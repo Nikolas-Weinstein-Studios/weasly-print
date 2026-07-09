@@ -191,18 +191,33 @@
   renderLabel();
 
   // ── Bluetooth support guard ──────────────────────────────────────
-  const supported = !!navigator.bluetooth;
-  if (!supported) {
+  // navigator.bluetooth may EXIST but be disabled — e.g. iOS Safari exposes a stub while the
+  // Web Bluetooth feature flag is off, throwing "globally disabled" at call time. Presence
+  // alone isn't enough: probe availability now, and treat disabled/unsupported errors at print
+  // time (below) as unsupported too, surfacing the Bluefy note instead of a raw error.
+  let unsupported = false;
+  function showUnsupported(reason) {
+    unsupported = true;
     $('ios-warning').classList.remove('hidden');
     $('printBtn').disabled = true;
-    $('printBtn').textContent = 'Bluetooth not available in this browser';
+    $('printBtn').textContent = 'Bluetooth unavailable in this browser';
+    if (reason) log('unsupported: ' + reason);
+    $('ios-warning').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  if (!navigator.bluetooth) {
+    showUnsupported('navigator.bluetooth is undefined');
+  } else if (navigator.bluetooth.getAvailability) {
+    navigator.bluetooth.getAvailability()
+      .then(a => { if (!a) showUnsupported('getAvailability() returned false'); })
+      .catch(() => {});
   }
 
   // ── Connect + print ──────────────────────────────────────────────
   let client = null, connected = false;
 
   $('printBtn').onclick = async () => {
-    if (!supported) return;
+    if (unsupported) return;
     const btn = $('printBtn');
     btn.disabled = true;
     try {
@@ -243,10 +258,17 @@
       status('Printed ✓', 'ok');
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
-      status('Error: ' + msg, 'err');
       log('ERROR: ' + msg);
+      if ((e && e.name === 'SecurityError') || /disabled|not supported|unsupported|globally|no bluetooth/i.test(msg)) {
+        status('This browser can’t use Bluetooth — see the note above.', 'err');
+        showUnsupported(msg);
+      } else if (/cancel|no devices/i.test(msg)) {
+        status('Cancelled — no printer selected.');
+      } else {
+        status('Error: ' + msg, 'err');
+      }
     } finally {
-      $('printBtn').disabled = false;
+      if (!unsupported) $('printBtn').disabled = false;
     }
   };
 </script>
