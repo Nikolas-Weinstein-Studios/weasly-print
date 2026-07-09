@@ -71,9 +71,14 @@
   <div class="meta" id="meta"></div>
 
   <div id="ios-warning" class="warn hidden">
-    <b>This browser can't reach Bluetooth.</b><br>
-    Safari and most iOS browsers don't support Web Bluetooth. On iPhone/iPad, open this
-    page in the <b>Bluefy</b> browser (free on the App Store) to print. On Android, use Chrome.
+    <b>This browser has Web Bluetooth disabled.</b>
+    <ul style="margin:8px 0 0 18px;padding:0;line-height:1.6">
+      <li><b>Android — Chrome:</b> works out of the box. Open this page in Chrome.</li>
+      <li><b>Android — Brave:</b> Brave disables Web Bluetooth by default. Enable it at
+        <code>brave://flags/#brave-web-bluetooth-api</code> and relaunch, or just use Chrome.</li>
+      <li><b>iPhone/iPad:</b> Safari doesn't support Web Bluetooth. Open this page in the
+        <b>Bluefy</b> browser (free on the App Store).</li>
+    </ul>
   </div>
 
   <div class="preview"><canvas id="label"></canvas></div>
