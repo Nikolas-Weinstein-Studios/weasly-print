@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weasly — Print Label</title>
+
+<!--
+  Weasly companion label-print page.
+
+  WHY THIS FILE EXISTS AND WHY IT IS SEPARATE FROM THE APP:
+  The main Weasly app is served by Google Apps Script, which renders our HTML inside a
+  sandboxed cross-origin iframe (script.googleusercontent.com). The Web Bluetooth API is
+  blocked in that context — navigator.bluetooth.requestDevice() throws SecurityError — no
+  matter the browser. This page must therefore be served from our OWN origin (GitHub Pages
+  / Cloudflare Pages / any static host), where it runs as a top-level page and Web Bluetooth
+  is permitted. Weasly's "Print to label printer" button opens this page in a new tab with
+  the item's WID, name, and QR target passed as URL params.
+
+  Prints to NIIMBOT printers (M2 / M2-H / B1 family) using the reverse-engineered protocol
+  library niimbluelib (https://github.com/MultiMote/niimbluelib, MIT). niimbluelib is alpha,
+  so the version below is pinned intentionally — bump it deliberately, not incidentally.
+
+  iOS/Safari has no Web Bluetooth. iPhone users must open this page in the Bluefy browser;
+  the guard below detects the missing API and tells them so.
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root{
+    --bg:#111; --surface:#1b1b1b; --border:#333; --text:#f2f2f2;
+    --muted:#9a9a9a; --accent:#e0603a; --accent-dim:#3a1f16;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg);color:var(--text);
+    min-height:100vh;padding:20px;display:flex;justify-content:center}
+  main{width:100%;max-width:460px;display:flex;flex-direction:column;gap:16px}
+  h1{font-size:20px;font-weight:500}
+  .meta{font-family:'DM Mono',monospace;color:var(--muted);font-size:14px;word-break:break-word}
+  .preview{background:#fff;border-radius:8px;padding:10px;display:flex;justify-content:center}
+  canvas{image-rendering:pixelated;max-width:100%;height:auto}
+  .controls{display:flex;flex-direction:column;gap:10px;background:var(--surface);
+    border:1px solid var(--border);border-radius:10px;padding:14px}
+  .row{display:flex;gap:10px;align-items:center;justify-content:space-between;font-size:14px}
+  .row label{color:var(--muted)}
+  input,select{background:#000;color:var(--text);border:1px solid var(--border);
+    border-radius:6px;padding:8px 10px;font:inherit;font-size:14px}
+  input[type=number]{width:70px}
+  .dims input{width:56px}
+  button{font:inherit;font-weight:500;border:none;border-radius:10px;padding:15px;
+    cursor:pointer;font-size:16px}
+  .btn-print{background:var(--accent);color:#fff}
+  .btn-print:disabled{opacity:.5;cursor:default}
+  .status{font-size:14px;color:var(--muted);min-height:20px;text-align:center}
+  .status.ok{color:#6fcf7f} .status.err{color:#e06a5a}
+  .warn{background:var(--accent-dim);border:1px solid var(--accent);border-radius:10px;
+    padding:14px;font-size:14px;line-height:1.5}
+  .warn b{color:var(--accent)}
+  details{font-size:12px;color:var(--muted)}
+  pre.log{background:#000;border:1px solid var(--border);border-radius:6px;padding:10px;
+    font-family:'DM Mono',monospace;font-size:11px;white-space:pre-wrap;max-height:160px;
+    overflow:auto;margin-top:6px}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <h1>Print Label</h1>
+  <div class="meta" id="meta"></div>
+
+  <div id="ios-warning" class="warn hidden">
+    <b>This browser can't reach Bluetooth.</b><br>
+    Safari and most iOS browsers don't support Web Bluetooth. On iPhone/iPad, open this
+    page in the <b>Bluefy</b> browser (free on the App Store) to print. On Android, use Chrome.
+  </div>
+
+  <div class="preview"><canvas id="label"></canvas></div>
+
+  <div class="controls">
+    <div class="row dims">
+      <label>Label size (mm)</label>
+      <span>
+        W <input id="wmm" type="number" min="10" max="80" step="1">
+        × H <input id="hmm" type="number" min="6" max="80" step="1">
+      </span>
+    </div>
+    <div class="row">
+      <label>Quantity</label>
+      <input id="qty" type="number" min="1" max="50" value="1">
+    </div>
+    <div class="row">
+      <label>Print direction</label>
+      <select id="dir">
+        <option value="left">left</option>
+        <option value="top">top</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Printer / task</label>
+      <input id="task" value="auto" title="'auto' detects the printer, falling back to B1. During device testing you can type an explicit niimbluelib task name here (e.g. B1, D11, V3, V4, V5) without editing code.">
+    </div>
+    <button class="btn-print" id="printBtn">Connect printer &amp; print</button>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <details>
+    <summary>Connection log</summary>
+    <pre class="log" id="log"></pre>
+  </details>
+</main>
+
+<script type="module">
+  // niimbluelib is ESM-only; esm.sh bundles it (and deps) for the browser. Pinned — alpha lib.
+  import { NiimbotBluetoothClient, ImageEncoder } from "https://esm.sh/@mmote/niimbluelib@0.0.1-alpha.39";
+
+  const $ = id => document.getElementById(id);
+  const DPMM = 8; // NIIMBOT print head is 203 dpi = 8 dots/mm
+
+  // ── Params from the launching app ────────────────────────────────
+  const p = new URLSearchParams(location.search);
+  const wid      = p.get('wid')  || '';
+  const name     = p.get('name') || '';
+  const qrTarget = p.get('url')  || wid;   // what the QR encodes (deep link back to the item)
+
+  $('wmm').value = p.get('wmm') || 50;
+  $('hmm').value = p.get('hmm') || 30;
+  $('qty').value = p.get('qty') || 1;
+  $('meta').textContent = wid + (name ? '  ·  ' + name : '');
+  document.title = wid ? ('Print ' + wid) : 'Weasly — Print Label';
+
+  const log    = m => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+  const status = (m, cls='') => { const el = $('status'); el.textContent = m; el.className = 'status ' + cls; };
+
+  // ── Label rendering (QR + WID + name) to a monochrome-friendly canvas ──
+  function wrapText(ctx, text, maxWidth) {
+    const words = String(text).split(/\s+/).filter(Boolean);
+    const lines = []; let line = '';
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = w; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  function renderLabel() {
+    const wmm = +$('wmm').value || 50, hmm = +$('hmm').value || 30;
+    const canvas = $('label');
+    canvas.width  = Math.round(wmm * DPMM);
+    canvas.height = Math.round(hmm * DPMM);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#000';
+
+    const pad = Math.round(canvas.height * 0.08);
+    const qrSize = canvas.height - pad * 2;
+
+    // qrcodejs renders a canvas synchronously; grab it and draw onto the label
+    const tmp = document.createElement('div');
+    new QRCode(tmp, { text: qrTarget, width: qrSize, height: qrSize,
+      colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M });
+    const qr = tmp.querySelector('canvas');
+    if (qr) ctx.drawImage(qr, pad, pad, qrSize, qrSize);
+
+    const textX = pad + qrSize + pad;
+    const textW = canvas.width - textX - pad;
+    ctx.textBaseline = 'top';
+
+    const widSize = Math.round(canvas.height * 0.18);
+    ctx.font = `500 ${widSize}px 'DM Mono', monospace`;
+    ctx.fillText(wid, textX, pad, textW);
+
+    const nameSize = Math.round(canvas.height * 0.13);
+    ctx.font = `400 ${nameSize}px 'DM Sans', sans-serif`;
+    const lines = wrapText(ctx, name, textW);
+    let y = pad + widSize + Math.round(canvas.height * 0.06);
+    const lh = Math.round(nameSize * 1.25);
+    const maxY = canvas.height - pad;
+    for (const l of lines) { if (y + lh > maxY) break; ctx.fillText(l, textX, y, textW); y += lh; }
+  }
+
+  // Re-render preview live when size fields change
+  ['wmm', 'hmm'].forEach(id => $(id).addEventListener('input', renderLabel));
+
+  // Fonts may load after first paint; re-render once they're ready so text isn't clipped.
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(renderLabel);
+  renderLabel();
+
+  // ── Bluetooth support guard ──────────────────────────────────────
+  const supported = !!navigator.bluetooth;
+  if (!supported) {
+    $('ios-warning').classList.remove('hidden');
+    $('printBtn').disabled = true;
+    $('printBtn').textContent = 'Bluetooth not available in this browser';
+  }
+
+  // ── Connect + print ──────────────────────────────────────────────
+  let client = null, connected = false;
+
+  $('printBtn').onclick = async () => {
+    if (!supported) return;
+    const btn = $('printBtn');
+    btn.disabled = true;
+    try {
+      renderLabel();
+
+      if (!client || !connected) {
+        status('Select your printer in the Bluetooth prompt…');
+        client = new NiimbotBluetoothClient();
+        client.on('connect', () => { connected = true; log('connected'); });
+        client.on('disconnect', () => { connected = false; log('disconnected'); });
+        client.on('printprogress', e =>
+          status(`Printing page ${e.page}/${e.pagesTotal} — ${e.pagePrintProgress}%`));
+        await client.connect();
+      }
+
+      const dir = $('dir').value;             // 'left' or 'top' — feed orientation
+      const qty = Math.max(1, +$('qty').value || 1);
+      const encoded = ImageEncoder.encodeCanvas($('label'), dir);
+
+      // Auto-detect the print task; fall back to B1. An explicit name in the field wins,
+      // so the printer variant can be tuned during device testing without a code change.
+      let taskName = $('task').value.trim();
+      if (!taskName || taskName.toLowerCase() === 'auto') taskName = client.getPrintTaskType() ?? 'B1';
+      log('print task: ' + taskName);
+
+      status('Printing…');
+      const task = client.abstraction.newPrintTask(taskName, {
+        totalPages: qty, statusPollIntervalMs: 100, statusTimeoutMs: 8000,
+      });
+      try {
+        await task.printInit();
+        await task.printPage(encoded, qty);
+        await task.waitForPageFinished();
+        await task.waitForFinished();
+      } finally {
+        await task.printEnd();
+      }
+      status('Printed ✓', 'ok');
+    } catch (e) {
+      const msg = (e && e.message) ? e.message : String(e);
+      status('Error: ' + msg, 'err');
+      log('ERROR: ' + msg);
+    } finally {
+      $('printBtn').disabled = false;
+    }
+  };
+</script>
+</body>
+</html>
