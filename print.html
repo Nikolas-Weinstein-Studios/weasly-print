@@ -67,7 +67,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 3</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 4</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="ios-warning" class="warn hidden">
@@ -98,8 +98,8 @@
     <div class="row">
       <label>Print direction</label>
       <select id="dir">
+        <option value="top" selected>top</option>
         <option value="left">left</option>
-        <option value="top">top</option>
       </select>
     </div>
     <div class="row">
@@ -122,7 +122,15 @@
   import { NiimbotBluetoothClient, ImageEncoder } from "https://esm.sh/@mmote/niimbluelib@0.0.1-alpha.39";
 
   const $ = id => document.getElementById(id);
-  const DPMM = 8; // NIIMBOT print head is 203 dpi = 8 dots/mm
+
+  // Print-head resolution. Different NIIMBOT models print at different densities —
+  // the B-series is 203 dpi (8 dots/mm) but the M2/M2_H is 300 dpi (~11.8 dots/mm).
+  // The canvas must be generated at the printer's ACTUAL density: at 1 canvas-pixel =
+  // 1 printer-dot, too few pixels means the image prints small and top-left, leaving
+  // margins. These default to the M2_H (our printer); on connect they are overwritten
+  // with the live values from client.getModelMetadata() so any model prints full-size.
+  let DPMM    = 300 / 25.4;   // dots per mm
+  let HEAD_PX = 567;          // printable dots across the head (caps canvas width so nothing clips)
 
   // ── Params from the launching app ────────────────────────────────
   const p = new URLSearchParams(location.search);
@@ -165,7 +173,9 @@
   function renderLabel() {
     const wmm = +$('wmm').value || 50, hmm = +$('hmm').value || 30;
     const canvas = $('label');
-    canvas.width  = Math.round(wmm * DPMM);
+    // Width runs across the print head, so it can't exceed the head's dot count
+    // (e.g. a 50mm label at 300dpi wants 590 dots but the M2_H head is 567 = 48mm).
+    canvas.width  = Math.min(Math.round(wmm * DPMM), HEAD_PX);
     canvas.height = Math.round(hmm * DPMM);
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -264,7 +274,23 @@
         client.on('printprogress', e =>
           status(`Printing page ${e.page}/${e.pagesTotal} — ${e.pagePrintProgress}%`));
         await client.connect();
+
+        // Match the canvas to THIS printer's real resolution so the label prints
+        // full-size. Without this, a 300dpi M2 prints a 203dpi canvas at ~68% scale.
+        try {
+          const meta = client.getModelMetadata && client.getModelMetadata();
+          if (meta) {
+            if (meta.dpi)            DPMM    = meta.dpi / 25.4;
+            if (meta.printheadPixels) HEAD_PX = meta.printheadPixels;
+            log(`printer: ${meta.model ?? '?'} — ${meta.dpi}dpi, head ${meta.printheadPixels}px, dir ${meta.printDirection}`);
+          } else {
+            log('no model metadata — using defaults (300dpi / M2_H)');
+          }
+        } catch (e) { log('metadata read failed: ' + (e.message || e)); }
       }
+
+      // Re-render at the (now known) device resolution before encoding.
+      renderLabel();
 
       const dir = $('dir').value;             // 'left' or 'top' — feed orientation
       const qty = Math.max(1, +$('qty').value || 1);
