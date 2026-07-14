@@ -67,7 +67,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 5</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 6</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="ios-warning" class="warn hidden">
@@ -187,14 +187,46 @@
     // Tight margins so the QR grows to nearly the full label height.
     const m   = Math.round(canvas.height * 0.05);
     const gap = Math.round(canvas.height * 0.06);   // breathing room between QR and text
-    const qrSize = canvas.height - m * 2;
+    const qrSize = canvas.height - m * 2;   // the box reserved for the QR + its quiet zone
 
-    // qrcodejs renders a canvas synchronously; grab it and draw onto the label
-    const tmp = document.createElement('div');
-    new QRCode(tmp, { text: qrTarget, width: qrSize, height: qrSize,
-      colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M });
-    const qr = tmp.querySelector('canvas');
-    if (qr) ctx.drawImage(qr, m, m, qrSize, qrSize);
+    // Render the QR so it prints cleanly on a 1-bit thermal head:
+    //  • Each module maps to a WHOLE number of dots. If qrcodejs scales to a size that
+    //    isn't an integer multiple of the module count, module edges anti-alias and the
+    //    head prints them unevenly — a major cause of scan failures.
+    //  • A quiet zone of >=4 modules of white surrounds the code (the spec requires it;
+    //    qrcodejs draws edge-to-edge and omits it). White from the label margin/gap
+    //    counts toward the quiet zone, so the module size stays as large as possible.
+    const QUIET = 4, LEVEL = QRCode.CorrectLevel.M;
+    let modules = 0;
+    try {
+      modules = new QRCode(document.createElement('div'),
+        { text: qrTarget, width: qrSize, height: qrSize, correctLevel: LEVEL })
+        ._oQRCode.getModuleCount();
+    } catch (e) { modules = 0; }
+
+    if (modules > 0) {
+      const outer = Math.min(m, gap);       // white the label already provides around the QR box
+      let dpm = 1;                          // dots per module (integer → crisp)
+      for (let d = Math.floor(qrSize / modules); d >= 1; d--) {
+        const inside = (qrSize - modules * d) / 2;   // white inside the box, each side
+        if (inside + outer >= QUIET * d) { dpm = d; break; }
+      }
+      const qrPx = modules * dpm;
+      const off  = Math.round((qrSize - qrPx) / 2);
+      const holder = document.createElement('div');
+      new QRCode(holder, { text: qrTarget, width: qrPx, height: qrPx,
+        colorDark: '#000', colorLight: '#fff', correctLevel: LEVEL });
+      const qr = holder.querySelector('canvas');
+      ctx.imageSmoothingEnabled = false;
+      if (qr) ctx.drawImage(qr, m + off, m + off);   // 1:1, no scaling → sharp modules
+    } else {
+      // Fallback if the module count can't be read.
+      const tmp = document.createElement('div');
+      new QRCode(tmp, { text: qrTarget, width: qrSize, height: qrSize,
+        colorDark: '#000', colorLight: '#fff', correctLevel: LEVEL });
+      const qr = tmp.querySelector('canvas');
+      if (qr) ctx.drawImage(qr, m, m, qrSize, qrSize);
+    }
 
     const textX = m + qrSize + gap;
     const textW = canvas.width - textX - m;
