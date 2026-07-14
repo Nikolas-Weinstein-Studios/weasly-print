@@ -152,6 +152,16 @@
     return lines;
   }
 
+  // Largest font (px) that fits `text` within `maxW` on one line, capped at `cap`.
+  function fitFontSize(ctx, text, maxW, cap, weight, family) {
+    let s = cap;
+    for (; s > 6; s--) {
+      ctx.font = `${weight} ${s}px ${family}`;
+      if (ctx.measureText(text).width <= maxW) break;
+    }
+    return s;
+  }
+
   function renderLabel() {
     const wmm = +$('wmm').value || 50, hmm = +$('hmm').value || 30;
     const canvas = $('label');
@@ -161,31 +171,49 @@
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#000';
 
-    const pad = Math.round(canvas.height * 0.08);
-    const qrSize = canvas.height - pad * 2;
+    // Tight margins so the QR grows to nearly the full label height.
+    const m   = Math.round(canvas.height * 0.05);
+    const gap = Math.round(canvas.height * 0.06);   // breathing room between QR and text
+    const qrSize = canvas.height - m * 2;
 
     // qrcodejs renders a canvas synchronously; grab it and draw onto the label
     const tmp = document.createElement('div');
     new QRCode(tmp, { text: qrTarget, width: qrSize, height: qrSize,
       colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M });
     const qr = tmp.querySelector('canvas');
-    if (qr) ctx.drawImage(qr, pad, pad, qrSize, qrSize);
+    if (qr) ctx.drawImage(qr, m, m, qrSize, qrSize);
 
-    const textX = pad + qrSize + pad;
-    const textW = canvas.width - textX - pad;
+    const textX = m + qrSize + gap;
+    const textW = canvas.width - textX - m;
     ctx.textBaseline = 'top';
 
-    const widSize = Math.round(canvas.height * 0.18);
-    ctx.font = `500 ${widSize}px 'DM Mono', monospace`;
-    ctx.fillText(wid, textX, pad, textW);
+    // WID: fill the text column width, capped so it never dwarfs the label.
+    const widSize = fitFontSize(ctx, wid, textW, Math.round(canvas.height * 0.30),
+      '500', "'DM Mono', monospace");
 
-    const nameSize = Math.round(canvas.height * 0.13);
+    // Name: scaled to the WID, wrapped to the column.
+    const nameSize = Math.max(Math.round(widSize * 0.6), Math.round(canvas.height * 0.11));
+    const nameLH = Math.round(nameSize * 1.2);
     ctx.font = `400 ${nameSize}px 'DM Sans', sans-serif`;
-    const lines = wrapText(ctx, name, textW);
-    let y = pad + widSize + Math.round(canvas.height * 0.06);
-    const lh = Math.round(nameSize * 1.25);
-    const maxY = canvas.height - pad;
-    for (const l of lines) { if (y + lh > maxY) break; ctx.fillText(l, textX, y, textW); y += lh; }
+    const allLines = wrapText(ctx, name, textW);
+
+    // Fit as many name lines as the space below the WID allows.
+    const widBottomGap = Math.round(canvas.height * 0.06);
+    const maxY = canvas.height - m;
+    const availForName = maxY - (m + widSize + widBottomGap);
+    const maxLines = Math.max(0, Math.floor(availForName / nameLH));
+    const lines = allLines.slice(0, maxLines);
+
+    // Vertically center the WID + name block against the QR.
+    const blockH = widSize + (lines.length ? widBottomGap + lines.length * nameLH : 0);
+    let y = m + Math.max(0, Math.round((qrSize - blockH) / 2));
+
+    ctx.font = `500 ${widSize}px 'DM Mono', monospace`;
+    ctx.fillText(wid, textX, y, textW);
+    y += widSize + widBottomGap;
+
+    ctx.font = `400 ${nameSize}px 'DM Sans', sans-serif`;
+    for (const l of lines) { ctx.fillText(l, textX, y, textW); y += nameLH; }
   }
 
   // Re-render preview live when size fields change
