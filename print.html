@@ -67,7 +67,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 6</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 7</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="ios-warning" class="warn hidden">
@@ -294,6 +294,26 @@
   // ── Connect + print ──────────────────────────────────────────────
   let client = null, connected = false;
 
+  // NIIMBOT primary GATT service (from niimbluelib).
+  const NIIMBOT_SERVICE = 'e7810a71-73ae-499d-8c15-faa9aef0c3f2';
+
+  // iOS/iPadOS (incl. Bluefy) is finicky about advertisement-based device filtering, so
+  // niimbluelib's model-name-prefix filter often hides the printer from the chooser. On
+  // iOS, force the picker to list ALL Bluetooth devices and let the user pick the printer;
+  // optionalServices keeps the NIIMBOT service reachable after connect. Android keeps the
+  // tidy filtered picker.
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  async function connectClient(c) {
+    if (!IS_IOS) return c.connect();
+    const orig = navigator.bluetooth.requestDevice.bind(navigator.bluetooth);
+    navigator.bluetooth.requestDevice = () =>
+      orig({ acceptAllDevices: true, optionalServices: [NIIMBOT_SERVICE] });
+    try { return await c.connect(); }
+    finally { navigator.bluetooth.requestDevice = orig; }
+  }
+
   $('printBtn').onclick = async () => {
     if (unsupported) return;
     const btn = $('printBtn');
@@ -302,13 +322,13 @@
       renderLabel();
 
       if (!client || !connected) {
-        status('Select your printer in the Bluetooth prompt…');
+        status('Select your printer (e.g. M2-H) in the Bluetooth list…');
         client = new NiimbotBluetoothClient();
         client.on('connect', () => { connected = true; log('connected'); });
         client.on('disconnect', () => { connected = false; log('disconnected'); });
         client.on('printprogress', e =>
           status(`Printing page ${e.page}/${e.pagesTotal} — ${e.pagePrintProgress}%`));
-        await client.connect();
+        await connectClient(client);
 
         // Match the canvas to THIS printer's real resolution so the label prints
         // full-size. Without this, a 300dpi M2 prints a 203dpi canvas at ~68% scale.
