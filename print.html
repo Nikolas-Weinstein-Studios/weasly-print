@@ -21,8 +21,15 @@
   library niimbluelib (https://github.com/MultiMote/niimbluelib, MIT). niimbluelib is alpha,
   so the version below is pinned intentionally — bump it deliberately, not incidentally.
 
-  iOS/Safari has no Web Bluetooth. iPhone users must open this page in the Bluefy browser;
-  the guard below detects the missing API and tells them so.
+  iOS/Safari has no Web Bluetooth. iPhone users have two options:
+   1. Open this page in the Bluefy browser to print directly over BLE (the guard below
+      detects the missing API and points them there).
+   2. Use "Save / share label image" — this exports the SAME composed label (QR + WID +
+      name) as a PNG and hands it to the iOS share sheet via the Web Share API. From there
+      the user sends it to the NIIMBOT app (or Saves to Photos and imports it), and the app
+      does the printing. This path works in plain Safari — no Bluefy, no Web Bluetooth. It
+      replaces the workaround of screenshotting the QR, which lost the WID/name and needed
+      cropping. Falls back to a plain download where Web Share can't take files (desktop).
 -->
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -53,6 +60,9 @@
     cursor:pointer;font-size:16px}
   .btn-print{background:var(--accent);color:#fff}
   .btn-print:disabled{opacity:.5;cursor:default}
+  .btn-share{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+  .or{color:var(--muted);font-size:12px;text-align:center;text-transform:uppercase;letter-spacing:.08em}
+  .btn-done{background:transparent;color:var(--muted);border:1px solid var(--border);font-size:14px;padding:12px}
   .status{font-size:14px;color:var(--muted);min-height:20px;text-align:center}
   .status.ok{color:#6fcf7f} .status.err{color:#e06a5a}
   .warn{background:var(--accent-dim);border:1px solid var(--accent);border-radius:10px;
@@ -67,7 +77,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 7</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 9</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="ios-warning" class="warn hidden">
@@ -107,9 +117,13 @@
       <input id="task" value="auto" title="'auto' detects the printer, falling back to B1. During device testing you can type an explicit niimbluelib task name here (e.g. B1, D11, V3, V4, V5) without editing code.">
     </div>
     <button class="btn-print" id="printBtn">Connect printer &amp; print</button>
+    <div class="or">or</div>
+    <button class="btn-share" id="shareBtn">Save / share label image</button>
   </div>
 
   <div class="status" id="status"></div>
+
+  <button class="btn-done" id="doneBtn">Done — back to Weasly</button>
 
   <details>
     <summary>Connection log</summary>
@@ -384,6 +398,65 @@
     } finally {
       if (!unsupported) $('printBtn').disabled = false;
     }
+  };
+
+  // ── Save / share label image (no Bluetooth) ──────────────────────
+  // Exports the composed label as a PNG and hands it to the OS share sheet. On iOS this is
+  // the path that avoids Bluefy entirely: the user shares the image straight to the NIIMBOT
+  // app (or saves to Photos and imports it), and the app prints. This button is NEVER
+  // disabled by the Bluetooth guard — it's the whole point on Safari.
+  //
+  // Note on resolution: without a connected printer we can't read the model's true DPI, so
+  // the label renders at the M2_H default (300dpi). That's fine — the NIIMBOT app rescales
+  // the imported image to the loaded stock; we just need a clean, crisp, high-contrast PNG.
+  $('shareBtn').onclick = async () => {
+    const btn = $('shareBtn');
+    btn.disabled = true;
+    try {
+      renderLabel();
+      const canvas = $('label');
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+      if (!blob) { status('Could not render the label image.', 'err'); return; }
+
+      const fname = (wid ? wid.replace(/[^\w-]+/g, '') : 'weasly-label') + '.png';
+      const file = new File([blob], fname, { type: 'image/png' });
+
+      // Preferred: native share sheet with the image file (iOS Safari 15+, Android Chrome).
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: wid || 'Weasly label' });
+          status('Shared ✓ — open the NIIMBOT app to print (or check Photos).', 'ok');
+          return;
+        } catch (e) {
+          const n = (e && (e.name || e.message)) || '';
+          if (/abort|cancel/i.test(n)) { status('Share cancelled.'); return; }
+          log('share failed, falling back to download: ' + n);   // fall through
+        }
+      }
+
+      // Fallback (desktop / no file-share support): download the PNG.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fname;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      status('Saved label image — import it in the NIIMBOT app.', 'ok');
+    } catch (e) {
+      status('Error: ' + ((e && e.message) || e), 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  // ── Back to the app ──────────────────────────────────────────────
+  // The app opened this page with window.open(..., '_blank'), which makes the tab
+  // script-closable: window.close() closes it and returns focus to the ORIGINAL Weasly tab,
+  // still loaded in the background — no navigation, no Apps Script reload. Navigating back
+  // in-tab would instead reload the app, which is the slow path we're avoiding. If a browser
+  // refuses to close a script-opened tab (rare), tell the user to close it manually.
+  $('doneBtn').onclick = () => {
+    window.close();
+    setTimeout(() => status('Close this tab to return to Weasly.'), 200);
   };
 </script>
 </body>
