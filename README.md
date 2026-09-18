@@ -34,8 +34,11 @@ made it, so a reload means another trip through the device chooser for every sin
   label requested while it was still loading is delivered rather than dropped.
 - Senders are accepted only from `*.googleusercontent.com` (the Apps Script iframe's
   per-deployment host) and only in that message shape.
-- **Back to Weasly** hands focus back without closing. **Close this tab** is the explicit
-  way out, and costs the printer connection.
+- There is no "back to Weasly" button. One shipped and was reverted the same day: Chromium
+  does not let a page move focus to another tab, so `window.opener.focus()` did nothing at
+  all on Android/Brave. A note tells the user to switch tabs themselves, which costs nothing
+  — the connection belongs to this page and survives as long as the tab does. **Close this
+  tab** is the explicit way out, and is what forces a reconnect.
 - Where `navigator.bluetooth.getDevices()` exists (Chrome on Android) the last printer is
   remembered in `localStorage` and reconnected without the chooser even after a reload.
   Bluefy doesn't implement it, so on iOS the open tab is what does the work.
