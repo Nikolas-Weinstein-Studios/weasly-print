@@ -77,7 +77,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 9</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 10</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="ios-warning" class="warn hidden">
@@ -123,7 +123,8 @@
 
   <div class="status" id="status"></div>
 
-  <button class="btn-done" id="doneBtn">Done — back to Weasly</button>
+  <button class="btn-done" id="doneBtn">Back to Weasly — keep printer connected</button>
+  <button class="btn-done" id="closeBtn" style="border:none;font-size:12px">Close this tab</button>
 
   <details>
     <summary>Connection log</summary>
@@ -148,15 +149,19 @@
 
   // ── Params from the launching app ────────────────────────────────
   const p = new URLSearchParams(location.search);
-  const wid      = p.get('wid')  || '';
-  const name     = p.get('name') || '';
-  const qrTarget = p.get('url')  || wid;   // what the QR encodes (deep link back to the item)
+  let wid      = p.get('wid')  || '';
+  let name     = p.get('name') || '';
+  let qrTarget = p.get('url')  || wid;   // what the QR encodes (deep link back to the item)
 
   $('wmm').value = p.get('wmm') || 50;
   $('hmm').value = p.get('hmm') || 30;
   $('qty').value = p.get('qty') || 1;
-  $('meta').textContent = wid + (name ? '  ·  ' + name : '');
-  document.title = wid ? ('Print ' + wid) : 'Weasly — Print Label';
+
+  function showItem() {
+    $('meta').textContent = wid + (name ? '  ·  ' + name : '');
+    document.title = wid ? ('Print ' + wid) : 'Weasly — Print Label';
+  }
+  showItem();
 
   const log    = m => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
   const status = (m, cls='') => { const el = $('status'); el.textContent = m; el.className = 'status ' + cls; };
@@ -308,6 +313,13 @@
   // ── Connect + print ──────────────────────────────────────────────
   let client = null, connected = false;
 
+  // The label reads differently once the printer is attached: the next one is one tap,
+  // with no chooser, for as long as this tab stays open.
+  function setPrintBtn() {
+    if (unsupported) return;
+    $('printBtn').textContent = connected ? 'Print' : 'Connect printer & print';
+  }
+
   // NIIMBOT primary GATT service (from niimbluelib).
   const NIIMBOT_SERVICE = 'e7810a71-73ae-499d-8c15-faa9aef0c3f2';
 
@@ -319,11 +331,38 @@
   const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
+  // Which printer was chosen last time. Only useful where getDevices() exists (Chrome on
+  // Android), which hands back devices already permitted so the chooser can be skipped
+  // entirely. Bluefy has no getDevices(), so on iOS the saving comes from the tab staying
+  // open rather than from here — this is the second line of defence, for when it doesn't.
+  const DEVICE_KEY = 'weasly-printer-id';
+
+  async function rememberedDevice() {
+    try {
+      const id = localStorage.getItem(DEVICE_KEY);
+      if (!id || !navigator.bluetooth.getDevices) return null;
+      const devices = await navigator.bluetooth.getDevices();
+      return devices.find(d => d.id === id) || null;
+    } catch (e) { log('getDevices unavailable: ' + (e.message || e)); return null; }
+  }
+
+  // niimbluelib calls navigator.bluetooth.requestDevice itself, so the way to choose the
+  // device — or supply one without prompting — is to stand in front of that call for the
+  // duration of connect(). Whatever comes back is remembered for next time.
   async function connectClient(c) {
-    if (!IS_IOS) return c.connect();
     const orig = navigator.bluetooth.requestDevice.bind(navigator.bluetooth);
-    navigator.bluetooth.requestDevice = () =>
-      orig({ acceptAllDevices: true, optionalServices: [NIIMBOT_SERVICE] });
+    const known = await rememberedDevice();
+    if (known) log('reusing remembered printer — no chooser');
+
+    navigator.bluetooth.requestDevice = (...args) => {
+      const pick = known ? Promise.resolve(known)
+        : IS_IOS ? orig({ acceptAllDevices: true, optionalServices: [NIIMBOT_SERVICE] })
+        : orig(...args);
+      return Promise.resolve(pick).then(d => {
+        try { if (d && d.id) localStorage.setItem(DEVICE_KEY, d.id); } catch (e) {}
+        return d;
+      });
+    };
     try { return await c.connect(); }
     finally { navigator.bluetooth.requestDevice = orig; }
   }
@@ -338,8 +377,8 @@
       if (!client || !connected) {
         status('Select your printer (e.g. M2-H) in the Bluetooth list…');
         client = new NiimbotBluetoothClient();
-        client.on('connect', () => { connected = true; log('connected'); });
-        client.on('disconnect', () => { connected = false; log('disconnected'); });
+        client.on('connect', () => { connected = true; log('connected'); setPrintBtn(); });
+        client.on('disconnect', () => { connected = false; log('disconnected'); setPrintBtn(); });
         client.on('printprogress', e =>
           status(`Printing page ${e.page}/${e.pagesTotal} — ${e.pagePrintProgress}%`));
         await connectClient(client);
@@ -448,13 +487,52 @@
     }
   };
 
+  // ── Labels pushed from the app while this tab stays open ─────────
+  //
+  // A Bluetooth connection belongs to the page that opened it: reload the page and the
+  // printer link is gone. This tab used to be opened fresh for every label, so every label
+  // meant another trip through the Bluetooth chooser — on iOS/Bluefy, which has no silent
+  // reconnect, that was the whole experience of printing.
+  //
+  // So Weasly now keeps this tab and posts the next label into it instead of reopening it.
+  // The page never reloads, `client` stays connected, and printing the second label is one
+  // tap. The sender is Weasly running inside an Apps Script iframe, whose origin is a
+  // per-deployment *.googleusercontent.com host, so the check is on the host suffix and the
+  // message shape — the payload only ever sets the text this page draws.
+  const SENDER_OK = /(^|\.)googleusercontent\.com$/;
+
+  window.addEventListener('message', e => {
+    let host = '';
+    try { host = new URL(e.origin).hostname; } catch (err) { return; }
+    if (!SENDER_OK.test(host)) return;
+    const d = e.data;
+    if (!d || d.type !== 'weasly-label' || typeof d.wid !== 'string') return;
+
+    wid      = d.wid;
+    name     = typeof d.name === 'string' ? d.name : '';
+    qrTarget = typeof d.url === 'string' && d.url ? d.url : wid;
+    showItem();
+    renderLabel();
+    status(connected ? 'Ready — printer still connected. Tap print.' : 'Ready.', connected ? 'ok' : '');
+    log('label pushed: ' + wid);
+  });
+
+  // Tells the app its listener is live, so a label requested while this page was still
+  // loading is delivered rather than dropped.
+  try { if (window.opener) window.opener.postMessage('weasly-print-ready', '*'); } catch (e) {}
+
   // ── Back to the app ──────────────────────────────────────────────
-  // The app opened this page with window.open(..., '_blank'), which makes the tab
-  // script-closable: window.close() closes it and returns focus to the ORIGINAL Weasly tab,
-  // still loaded in the background — no navigation, no Apps Script reload. Navigating back
-  // in-tab would instead reload the app, which is the slow path we're avoiding. If a browser
-  // refuses to close a script-opened tab (rare), tell the user to close it manually.
+  // Deliberately does NOT close the tab — closing it drops the printer connection, which is
+  // the thing this page now works hardest to keep. It just hands focus back to the Weasly
+  // tab, still loaded in the background. Where a browser won't move focus by script (iOS is
+  // inconsistent about it), the user switches tabs themselves and nothing is lost either way.
   $('doneBtn').onclick = () => {
+    try { if (window.opener && !window.opener.closed) window.opener.focus(); } catch (e) {}
+    status('Switch back to Weasly — leave this tab open to keep the printer connected.');
+  };
+
+  // The explicit way out, for when printing is finished.
+  $('closeBtn').onclick = () => {
     window.close();
     setTimeout(() => status('Close this tab to return to Weasly.'), 200);
   };
