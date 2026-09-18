@@ -23,6 +23,23 @@ https://nikolas-weinstein-studios.github.io/weasly-print/print.html
 
 Weasly's `LABEL_PRINT_URL` constant (in its `Index.html`) points here.
 
+## The tab stays open
+
+Weasly opens this page **once** and then posts each subsequent label into it
+(`postMessage`, `{type:'weasly-label', wid, name, url}`). It does not reopen the page per
+label, and this page does not reload — a Bluetooth connection belongs to the page that
+made it, so a reload means another trip through the device chooser for every single label.
+
+- The page answers `weasly-print-ready` to its opener once its listener is attached, so a
+  label requested while it was still loading is delivered rather than dropped.
+- Senders are accepted only from `*.googleusercontent.com` (the Apps Script iframe's
+  per-deployment host) and only in that message shape.
+- **Back to Weasly** hands focus back without closing. **Close this tab** is the explicit
+  way out, and costs the printer connection.
+- Where `navigator.bluetooth.getDevices()` exists (Chrome on Android) the last printer is
+  remembered in `localStorage` and reconnected without the chooser even after a reload.
+  Bluefy doesn't implement it, so on iOS the open tab is what does the work.
+
 ## Editing / testing
 
 This is the canonical copy of `print.html` — edit it here, not in the Weasly repo.
