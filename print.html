@@ -72,12 +72,15 @@
   pre.log{background:#000;border:1px solid var(--border);border-radius:6px;padding:10px;
     font-family:'DM Mono',monospace;font-size:11px;white-space:pre-wrap;max-height:160px;
     overflow:auto;margin-top:6px}
+  .note{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px;font-size:13px;line-height:1.5;color:var(--muted)}
+  .note b{color:var(--text)}
   .hidden{display:none!important}
 </style>
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 10</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 11</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="ios-warning" class="warn hidden">
@@ -123,8 +126,12 @@
 
   <div class="status" id="status"></div>
 
-  <button class="btn-done" id="doneBtn">Back to Weasly — keep printer connected</button>
-  <button class="btn-done" id="closeBtn" style="border:none;font-size:12px">Close this tab</button>
+  <div class="note" id="stayNote">
+    <b>Leave this tab open.</b> Switch back to Weasly yourself — from the tab bar, or the
+    Recents / back gesture — and print the next label from there. It arrives here and the
+    printer stays connected. Closing this tab is what forces a reconnect.
+  </div>
+  <button class="btn-done" id="closeBtn">Close this tab — done printing</button>
 
   <details>
     <summary>Connection log</summary>
@@ -522,14 +529,13 @@
   try { if (window.opener) window.opener.postMessage('weasly-print-ready', '*'); } catch (e) {}
 
   // ── Back to the app ──────────────────────────────────────────────
-  // Deliberately does NOT close the tab — closing it drops the printer connection, which is
-  // the thing this page now works hardest to keep. It just hands focus back to the Weasly
-  // tab, still loaded in the background. Where a browser won't move focus by script (iOS is
-  // inconsistent about it), the user switches tabs themselves and nothing is lost either way.
-  $('doneBtn').onclick = () => {
-    try { if (window.opener && !window.opener.closed) window.opener.focus(); } catch (e) {}
-    status('Switch back to Weasly — leave this tab open to keep the printer connected.');
-  };
+  // There is no button for this, deliberately. A "Back to Weasly" button that called
+  // window.opener.focus() shipped and was reverted the same day (Android / Brave,
+  // 2026-09-18): Chromium does not let a page move focus to another tab, so the button
+  // did nothing at all. A note that tells the truth beats a control that lies.
+  //
+  // Switching tabs by hand costs nothing — the printer connection belongs to this page and
+  // survives as long as the tab does, which is the whole point.
 
   // The explicit way out, for when printing is finished.
   $('closeBtn').onclick = () => {
