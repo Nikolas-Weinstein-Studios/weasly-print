@@ -60,16 +60,28 @@ across the bottom, `title` large at top left, and up to four `lines` beside it, 
 whatever label size is set on the page. At most 500 labels; anything else in a bad shape is
 refused with a message rather than printed.
 
-- **Print all** sends the batch as one print task over one connection. Step through with
-  ‹ ›: the button then prints from the label on screen to the end, which is how a batch that
-  stopped part way is resumed. **Print only this label** is for a reprint.
+- **One at a time** (the default) prints the label on screen and brings up the next one not
+  yet printed — for printing as each piece comes off the saw. ‹ › steps to any label; one
+  already printed offers a reprint.
+- **All at once** sends from the label on screen to the end as one print task over one
+  connection; if it stops part way, step to the first label that didn't come out and print
+  from there. **Print only this label** is for a reprint.
+- Printed labels are ticked and remembered in `localStorage`, by code for each sending tool
+  (`from`), so a batch reopened later, or a different selection from the same tool, starts at
+  the first label still to print. **Start over** clears the ticks for the batch on screen.
+  The mode choice is remembered too.
+- **Test print** prints a label marked TEST, with a Code 128 that reads `TEST` and corner
+  marks at the edges of the printed area, at the current size and direction. It never counts
+  as printed. It is there in Weasly's single-label mode as well.
 - A plain link has no opener, so a batch tab gets no further labels; the next batch opens a
   tab of its own. On Android Chrome the remembered printer reconnects without the chooser.
 - If the tab opens with an opaque origin — a sandboxed frame that couldn't let the popup
   escape — Bluetooth can't work there, and the page says to copy its address into a new tab.
 
-The spine roller's `npm run e2e` loads this repo's `print.html` from a sibling checkout and
-scans the barcodes it draws, so run it after changing the batch layout.
+The spine roller's `npm run e2e` loads this repo's `print.html` from a sibling checkout,
+drives the test print, one at a time, resume and all at once against a stand-in printer
+(its `test/fake-printer.js` answers the niimbluelib import), and scans every label sent. Run
+it after changing anything here.
 
 ## Editing / testing
 

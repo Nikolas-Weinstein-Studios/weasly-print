@@ -84,12 +84,18 @@
   .batchnav button{background:var(--surface);color:var(--text);border:1px solid var(--border);
     padding:8px 18px;font-size:20px;line-height:1}
   .batchnav button:disabled{opacity:.35;cursor:default}
+  .progress{text-align:center;font-size:13px;color:var(--muted)}
+  .linkbtn{background:none;border:none;padding:0 0 0 8px;color:var(--accent);font-size:13px;
+    text-decoration:underline;border-radius:0}
+  .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .seg button{border:0;border-radius:0;background:#000;color:var(--muted);padding:8px 12px;font-size:14px}
+  .seg button[aria-pressed=true]{background:var(--text);color:var(--bg)}
   .hidden{display:none!important}
 </style>
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 12</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 13</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="batch-error" class="warn hidden"></div>
@@ -118,6 +124,7 @@
     <span id="batchPos"></span>
     <button id="nextBtn" aria-label="Next label">›</button>
   </div>
+  <div class="progress hidden" id="progress"><span id="progressText"></span><button class="linkbtn" id="resetBtn">Start over</button></div>
 
   <div class="controls">
     <div class="row dims">
@@ -142,8 +149,15 @@
       <label>Printer / task</label>
       <input id="task" value="auto" title="'auto' detects the printer, falling back to B1. During device testing you can type an explicit niimbluelib task name here (e.g. B1, D11, V3, V4, V5) without editing code.">
     </div>
+    <div class="row hidden" id="modeRow">
+      <label>Print</label>
+      <div class="seg" role="group" aria-label="Print mode">
+        <button data-mode="step">One at a time</button><button data-mode="all">All at once</button>
+      </div>
+    </div>
     <button class="btn-print" id="printBtn">Connect printer &amp; print</button>
     <button class="btn-share hidden" id="printOneBtn">Print only this label</button>
+    <button class="btn-share" id="testBtn">Test print</button>
     <div class="or">or</div>
     <button class="btn-share" id="shareBtn">Save / share label image</button>
   </div>
@@ -156,9 +170,13 @@
     printer stays connected. Closing this tab is what forces a reconnect.
   </div>
   <div class="note hidden" id="batchNote">
-    <b>Keep this tab open until the batch is out.</b> If printing stops part way, step to the
-    first label that didn't come out and print from there. Close this tab when you're done —
-    the next batch opens a tab of its own, so close any old print tabs first.
+    <b>Keep this tab open while you work</b> — the printer stays connected as long as it is.
+    <b>One at a time:</b> tap Print as each piece comes off; the next label comes up by
+    itself. <b>All at once:</b> prints from the label on screen to the end; if it stops part
+    way, step to the first label that didn't come out and print from there. Printed labels
+    are ticked and remembered in this browser, so reopening the batch picks up where you left
+    off. <b>Test print</b> uses a label marked TEST and doesn't count. Close any old print
+    tabs before opening a new batch.
   </div>
   <button class="btn-done" id="closeBtn">Close this tab — done printing</button>
 
@@ -227,21 +245,50 @@
     else batch = r;
   }
 
+  // Printed labels, remembered in this browser by code for each sending tool, so a batch
+  // reopened later — or a different selection from the same tool — shows what's already
+  // done. "One at a time" starts at, and moves on to, the first label not yet printed.
+  const DONE_KEY = 'weasly-print-done:' + from;
+  let printed = new Set();
+  try { printed = new Set(JSON.parse(localStorage.getItem(DONE_KEY) || '[]')); } catch (e) {}
+  const isPrinted = i => printed.has(batch[i].code);
+  function setPrinted(codes, on) {
+    for (const c of codes) on ? printed.add(c) : printed.delete(c);
+    try { localStorage.setItem(DONE_KEY, JSON.stringify([...printed])); } catch (e) {}
+  }
+  // the first label not yet printed after `i`, else the first anywhere, else `i`
+  function nextUnprinted(i) {
+    for (let j = i + 1; j < batch.length; j++) if (!isPrinted(j)) return j;
+    for (let j = 0; j < batch.length; j++) if (!isPrinted(j)) return j;
+    return i;
+  }
+
+  let mode = 'step';                       // 'step' (one at a time) or 'all'
+  try { if (localStorage.getItem('weasly-print-mode') === 'all') mode = 'all'; } catch (e) {}
+  if (batch && mode === 'step' && isPrinted(0)) batchIdx = nextUnprinted(0);
+
   function showItem() {
+    const many = !!batch && batch.length > 1;
     if (batch) {
       const n = batch.length, cur = batch[batchIdx];
       $('meta').textContent = (from ? from + '  ·  ' : '') + n + (n === 1 ? ' label' : ' labels') +
         '  ·  ' + cur.code;
       document.title = 'Print ' + n + (n === 1 ? ' label' : ' labels');
-      $('batchPos').textContent = (batchIdx + 1) + ' of ' + n;
+      $('batchPos').textContent = (batchIdx + 1) + ' of ' + n + (isPrinted(batchIdx) ? '  ✓' : '');
       $('prevBtn').disabled = batchIdx === 0;
       $('nextBtn').disabled = batchIdx === n - 1;
+      const done = batch.filter(l => printed.has(l.code)).length;
+      $('progressText').textContent = done === n ? `All ${n} printed.` : `${done} of ${n} printed.`;
+      $('progress').classList.toggle('hidden', !done);
+      document.querySelectorAll('[data-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
     } else {
       $('meta').textContent = wid + (name ? '  ·  ' + name : '');
       document.title = wid ? ('Print ' + wid) : 'Weasly — Print Label';
+      $('progress').classList.add('hidden');
     }
-    $('batchNav').classList.toggle('hidden', !batch || batch.length < 2);
-    $('printOneBtn').classList.toggle('hidden', !batch || batch.length < 2);
+    $('batchNav').classList.toggle('hidden', !many);
+    $('modeRow').classList.toggle('hidden', !many);
+    $('printOneBtn').classList.toggle('hidden', !many || mode === 'step');
     $('qtyRow').classList.toggle('hidden', !!batch);
     $('stayNote').classList.toggle('hidden', !!batch);
     $('batchNote').classList.toggle('hidden', !batch);
@@ -341,7 +388,18 @@
     });
   }
 
-  function renderLabel() {
+  // The test print: the real layout with a barcode that reads TEST, and corner marks at the
+  // edges of the printed area so a clipped or shifted print shows. Never counted as printed.
+  const testLabel = () => ({ code: 'TEST', title: 'TEST', marks: true,
+    lines: ['Test print', `${$('wmm').value} × ${$('hmm').value} mm, ${$('dir').value}`, 'Scans as TEST'] });
+  function cornerMarks(ctx, W, H) {
+    const l = Math.round(2.5 * DPMM), t = 2;
+    for (const [x, y] of [[0, 0], [W - l, 0], [0, H - t], [W - l, H - t]]) ctx.fillRect(x, y, l, t);
+    for (const [x, y] of [[0, 0], [W - t, 0], [0, H - l], [W - t, H - l]]) ctx.fillRect(x, y, t, l);
+  }
+
+  // `lab` draws that label instead of the one on screen (the test print).
+  function renderLabel(lab) {
     const wmm = +$('wmm').value || 50, hmm = +$('hmm').value || 30;
     const canvas = $('label');
     // The NIIMBOT encoder requires the pixel count on each axis to be a multiple of 8
@@ -354,7 +412,12 @@
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#000';
-    if (batch) { drawBarcodeLabel(ctx, canvas.width, canvas.height, batch[batchIdx]); return; }
+    lab = lab || (batch && batch[batchIdx]);
+    if (lab) {
+      drawBarcodeLabel(ctx, canvas.width, canvas.height, lab);
+      if (lab.marks) cornerMarks(ctx, canvas.width, canvas.height);
+      return;
+    }
 
     // Tight margins so the QR grows to nearly the full label height.
     const m   = Math.round(canvas.height * 0.05);
@@ -434,10 +497,10 @@
   }
 
   // Re-render preview live when size fields change
-  ['wmm', 'hmm'].forEach(id => $(id).addEventListener('input', renderLabel));
+  ['wmm', 'hmm'].forEach(id => $(id).addEventListener('input', () => renderLabel()));
 
   // Fonts may load after first paint; re-render once they're ready so text isn't clipped.
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(renderLabel);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => renderLabel());
   renderLabel();
 
   // ── Bluetooth support guard ──────────────────────────────────────
@@ -449,7 +512,7 @@
   function showUnsupported(reason) {
     unsupported = true;
     $('ios-warning').classList.remove('hidden');
-    $('printBtn').disabled = $('printOneBtn').disabled = true;
+    $('printBtn').disabled = $('printOneBtn').disabled = $('testBtn').disabled = true;
     $('printBtn').textContent = 'Bluetooth unavailable in this browser';
     if (reason) log('unsupported: ' + reason);
     $('ios-warning').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -461,7 +524,7 @@
   if (self.origin === 'null') {
     unsupported = true;
     $('sandbox-warning').classList.remove('hidden');
-    $('printBtn').disabled = $('printOneBtn').disabled = true;
+    $('printBtn').disabled = $('printOneBtn').disabled = $('testBtn').disabled = true;
     $('printBtn').textContent = 'Bluetooth blocked in this tab';
     log('unsupported: opaque origin (sandboxed)');
   } else if (!navigator.bluetooth) {
@@ -480,12 +543,14 @@
   // In a batch it says what will go: all of it, or from the label on screen to the end.
   function setPrintBtn() {
     if (unsupported) return;
-    let what = '';
+    let what = 'print';
     if (batch) {
-      const n = batch.length;
-      what = n === 1 ? ' 1 label' : batchIdx === 0 ? ` all ${n} labels` : ` labels ${batchIdx + 1}–${n}`;
+      const n = batch.length, cur = batch[batchIdx];
+      if (n === 1 || mode === 'step')
+        what = `${isPrinted(batchIdx) ? 'reprint' : 'print'} ${cur.title || cur.code}` + (n > 1 ? ` — ${batchIdx + 1} of ${n}` : '');
+      else what = batchIdx === 0 ? `print all ${n} labels` : `print labels ${batchIdx + 1}–${n}`;
     }
-    $('printBtn').textContent = connected ? 'Print' + what : 'Connect printer & print' + what;
+    $('printBtn').textContent = connected ? what[0].toUpperCase() + what.slice(1) : 'Connect printer & ' + what;
   }
   setPrintBtn();
 
@@ -495,6 +560,16 @@
   }
   $('prevBtn').onclick = () => showLabel(batchIdx - 1);
   $('nextBtn').onclick = () => showLabel(batchIdx + 1);
+  document.querySelectorAll('[data-mode]').forEach(b => { b.onclick = () => {
+    mode = b.dataset.mode;
+    try { localStorage.setItem('weasly-print-mode', mode); } catch (e) {}
+    showItem(); setPrintBtn();
+  }; });
+  $('resetBtn').onclick = () => {
+    if (!confirm('Clear the printed ticks for this batch?')) return;
+    setPrinted(batch.map(l => l.code), false);
+    showLabel(0);
+  };
 
   // NIIMBOT primary GATT service (from niimbluelib).
   const NIIMBOT_SERVICE = 'e7810a71-73ae-499d-8c15-faa9aef0c3f2';
@@ -543,13 +618,15 @@
     finally { navigator.bluetooth.requestDevice = orig; }
   }
 
-  // `pages` is a list of indexes into the batch, or null for the single label on screen.
-  async function print(pages) {
+  // `jobs` are the labels to send, in order: {idx} a label of the batch, {label} one drawn
+  // instead (the test print), {qty} copies of the single Weasly label on screen.
+  async function print(jobs) {
     if (unsupported) return;
-    const btns = [$('printBtn'), $('printOneBtn')];
+    const btns = [$('printBtn'), $('printOneBtn'), $('testBtn')];
     btns.forEach(b => { b.disabled = true; });
+    const isTest = jobs.length === 1 && !!jobs[0].label;
     try {
-      renderLabel();
+      renderLabel(jobs[0].label);
 
       if (!client || !connected) {
         status('Select your printer (e.g. M2-H) in the Bluetooth list…');
@@ -575,8 +652,6 @@
       }
 
       const dir = $('dir').value;             // 'left' or 'top' — feed orientation
-      const qty = batch ? 1 : Math.max(1, +$('qty').value || 1);
-      const list = pages || [null];
 
       // Auto-detect the print task; fall back to B1. An explicit name in the field wins,
       // so the printer variant can be tuned during device testing without a code change.
@@ -588,23 +663,37 @@
       // One task for the whole batch, one page per label: the connection is set up once and
       // the printer feeds straight from one label to the next.
       const task = client.abstraction.newPrintTask(taskName, {
-        totalPages: list.length * qty, statusPollIntervalMs: 100, statusTimeoutMs: 8000,
+        totalPages: jobs.reduce((n, j) => n + (j.qty || 1), 0), statusPollIntervalMs: 100, statusTimeoutMs: 8000,
       });
       try {
         await task.printInit();
-        for (const i of list) {
+        for (const j of jobs) {
           // Each label goes on screen as it is sent, so if one fails it is the one showing.
-          if (i !== null) { batchIdx = i; showItem(); setPrintBtn(); }
-          renderLabel();                      // at the (now known) device resolution
-          await task.printPage(ImageEncoder.encodeCanvas($('label'), dir), qty);
+          if (j.idx !== undefined) { batchIdx = j.idx; showItem(); setPrintBtn(); }
+          renderLabel(j.label);               // at the (now known) device resolution
+          await task.printPage(ImageEncoder.encodeCanvas($('label'), dir), j.qty || 1);
           await task.waitForPageFinished();
+          if (j.idx !== undefined) setPrinted([batch[j.idx].code], true);
         }
         await task.waitForFinished();
       } finally {
         await task.printEnd();
       }
-      if (list.length > 1) showLabel(0);
-      status(list.length > 1 ? `Printed ${list.length} labels ✓` : 'Printed ✓', 'ok');
+      if (isTest) {
+        renderLabel();
+        status('Test label printed ✓ — check the corner marks, then scan it: it should read TEST.', 'ok');
+      } else if (!batch) {
+        status('Printed ✓', 'ok');
+      } else if (jobs.length === 1 && mode === 'step' && batch.length > 1) {
+        // as you go: bring up the next label still to print
+        const done = batch[jobs[0].idx], nxt = nextUnprinted(jobs[0].idx);
+        showLabel(nxt);
+        status(isPrinted(nxt) ? `Printed ${done.title || done.code} ✓ — that’s the whole batch.`
+          : `Printed ${done.title || done.code} ✓ — next up: ${batch[nxt].title || batch[nxt].code}.`, 'ok');
+      } else {
+        showLabel(jobs.length > 1 ? nextUnprinted(batchIdx) : batchIdx);
+        status(jobs.length > 1 ? `Printed ${jobs.length} labels ✓` : 'Printed ✓', 'ok');
+      }
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
       log('ERROR: ' + msg);
@@ -613,18 +702,23 @@
         showUnsupported(msg);
       } else if (/cancel|no devices/i.test(msg)) {
         status('Cancelled — no printer selected.');
-      } else if (pages && pages.length > 1) {
+      } else if (jobs.length > 1) {
         status(`Stopped at label ${batchIdx + 1} of ${batch.length}: ${msg}. Check what came out, ` +
           'step back to the first label that didn’t, and print from there.', 'err');
       } else {
         status('Error: ' + msg, 'err');
       }
     } finally {
+      if (isTest) renderLabel();
       if (!unsupported) btns.forEach(b => { b.disabled = false; });
     }
   }
-  $('printBtn').onclick = () => print(batch ? batch.map((_, i) => i).slice(batchIdx) : null);
-  $('printOneBtn').onclick = () => print([batchIdx]);
+  $('printBtn').onclick = () => print(
+    !batch ? [{ qty: Math.max(1, +$('qty').value || 1) }]
+    : mode === 'step' ? [{ idx: batchIdx }]
+    : batch.map((_, i) => ({ idx: i })).slice(batchIdx));
+  $('printOneBtn').onclick = () => print([{ idx: batchIdx }]);
+  $('testBtn').onclick = () => print([{ label: testLabel() }]);
 
   // ── Save / share label image (no Bluetooth) ──────────────────────
   // Exports the composed label as a PNG and hands it to the OS share sheet. On iOS this is
