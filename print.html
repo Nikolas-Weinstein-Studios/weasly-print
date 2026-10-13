@@ -21,6 +21,10 @@
   library niimbluelib (https://github.com/MultiMote/niimbluelib, MIT). niimbluelib is alpha,
   so the version below is pinned intentionally — bump it deliberately, not incidentally.
 
+  It also prints batches of Code 128 labels for other studio tools — the NYU spine roller,
+  a Claude artifact with the same sandboxed-iframe problem. Those arrive as a list in the
+  URL fragment (#labels=…); see "Batches of barcode labels" in the script.
+
   iOS/Safari has no Web Bluetooth. iPhone users have two options:
    1. Open this page in the Bluefy browser to print directly over BLE (the guard below
       detects the missing API and points them there).
@@ -33,7 +37,7 @@
 -->
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
   :root{
@@ -75,13 +79,26 @@
   .note{background:var(--surface);border:1px solid var(--border);border-radius:10px;
     padding:12px 14px;font-size:13px;line-height:1.5;color:var(--muted)}
   .note b{color:var(--text)}
+  .batchnav{display:flex;align-items:center;justify-content:center;gap:14px;
+    font-family:'DM Mono',monospace;font-size:14px;color:var(--muted)}
+  .batchnav button{background:var(--surface);color:var(--text);border:1px solid var(--border);
+    padding:8px 18px;font-size:20px;line-height:1}
+  .batchnav button:disabled{opacity:.35;cursor:default}
   .hidden{display:none!important}
 </style>
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 11</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 12</span></h1>
   <div class="meta" id="meta"></div>
+
+  <div id="batch-error" class="warn hidden"></div>
+
+  <div id="sandbox-warning" class="warn hidden">
+    <b>This tab opened inside a sandbox, where Bluetooth is blocked.</b>
+    Copy this page's address into a new tab and print from there. Saving the label image
+    still works here.
+  </div>
 
   <div id="ios-warning" class="warn hidden">
     <b>This browser has Web Bluetooth disabled.</b>
@@ -96,6 +113,12 @@
 
   <div class="preview"><canvas id="label"></canvas></div>
 
+  <div class="batchnav hidden" id="batchNav">
+    <button id="prevBtn" aria-label="Previous label">‹</button>
+    <span id="batchPos"></span>
+    <button id="nextBtn" aria-label="Next label">›</button>
+  </div>
+
   <div class="controls">
     <div class="row dims">
       <label>Label size (mm)</label>
@@ -104,7 +127,7 @@
         × H <input id="hmm" type="number" min="6" max="80" step="1">
       </span>
     </div>
-    <div class="row">
+    <div class="row" id="qtyRow">
       <label>Quantity</label>
       <input id="qty" type="number" min="1" max="50" value="1">
     </div>
@@ -120,6 +143,7 @@
       <input id="task" value="auto" title="'auto' detects the printer, falling back to B1. During device testing you can type an explicit niimbluelib task name here (e.g. B1, D11, V3, V4, V5) without editing code.">
     </div>
     <button class="btn-print" id="printBtn">Connect printer &amp; print</button>
+    <button class="btn-share hidden" id="printOneBtn">Print only this label</button>
     <div class="or">or</div>
     <button class="btn-share" id="shareBtn">Save / share label image</button>
   </div>
@@ -130,6 +154,11 @@
     <b>Leave this tab open.</b> Switch back to Weasly yourself — from the tab bar, or the
     Recents / back gesture — and print the next label from there. It arrives here and the
     printer stays connected. Closing this tab is what forces a reconnect.
+  </div>
+  <div class="note hidden" id="batchNote">
+    <b>Keep this tab open until the batch is out.</b> If printing stops part way, step to the
+    first label that didn't come out and print from there. Close this tab when you're done —
+    the next batch opens a tab of its own, so close any old print tabs first.
   </div>
   <button class="btn-done" id="closeBtn">Close this tab — done printing</button>
 
@@ -164,9 +193,59 @@
   $('hmm').value = p.get('hmm') || 30;
   $('qty').value = p.get('qty') || 1;
 
+  // ── Batches of barcode labels ────────────────────────────────────
+  // Other tools hand over a whole batch in the URL fragment, which never reaches a server:
+  //   print.html#from=<tool name>&labels=<JSON [{code, title, lines}]>
+  // Each label is a Code 128 barcode of `code` across the bottom, `title` large at top left
+  // and up to four short `lines` beside it. The NYU spine roller sends one per spine:
+  //   {code:'S047', title:'47', lines:['Center  L-3', 'R 2905   cut 1543', 'Stock 5, cut 2 of 7']}
+  // It runs as a Claude artifact — a sandboxed iframe, Weasly's problem again — and opens
+  // this page with a plain link, so there is no opener to post to: the fragment carries
+  // everything, and the whole batch goes out over one connection.
+  // The payload only sets text drawn onto the canvas, so it is checked for shape and size.
+  const MAX_BATCH = 500;
+  const h = new URLSearchParams(location.hash.slice(1));
+  const from = (h.get('from') || '').slice(0, 60);
+  let batch = null, batchIdx = 0;
+
+  function readBatch(raw) {
+    let list;
+    try { list = JSON.parse(raw); } catch (e) { return 'The label list in this link could not be read.'; }
+    if (!Array.isArray(list) || !list.length) return 'This link has no labels in it.';
+    if (list.length > MAX_BATCH) return `This link has ${list.length} labels; the most one batch takes is ${MAX_BATCH}.`;
+    const str = (s, n) => typeof s === 'string' && s.length <= n;
+    for (const l of list) {
+      if (!l || !str(l.code, 40) || !/^[\x20-\x7e]+$/.test(l.code) || !str(l.title || '', 16) ||
+          !Array.isArray(l.lines || []) || (l.lines || []).length > 4 || !(l.lines || []).every(x => str(x, 80)))
+        return 'One of the labels in this link is not in a shape this page can print.';
+    }
+    return list.map(l => ({ code: l.code, title: l.title || '', lines: l.lines || [] }));
+  }
+  if (h.has('labels')) {
+    const r = readBatch(h.get('labels'));
+    if (typeof r === 'string') { $('batch-error').textContent = r; $('batch-error').classList.remove('hidden'); }
+    else batch = r;
+  }
+
   function showItem() {
-    $('meta').textContent = wid + (name ? '  ·  ' + name : '');
-    document.title = wid ? ('Print ' + wid) : 'Weasly — Print Label';
+    if (batch) {
+      const n = batch.length, cur = batch[batchIdx];
+      $('meta').textContent = (from ? from + '  ·  ' : '') + n + (n === 1 ? ' label' : ' labels') +
+        '  ·  ' + cur.code;
+      document.title = 'Print ' + n + (n === 1 ? ' label' : ' labels');
+      $('batchPos').textContent = (batchIdx + 1) + ' of ' + n;
+      $('prevBtn').disabled = batchIdx === 0;
+      $('nextBtn').disabled = batchIdx === n - 1;
+    } else {
+      $('meta').textContent = wid + (name ? '  ·  ' + name : '');
+      document.title = wid ? ('Print ' + wid) : 'Weasly — Print Label';
+    }
+    $('batchNav').classList.toggle('hidden', !batch || batch.length < 2);
+    $('printOneBtn').classList.toggle('hidden', !batch || batch.length < 2);
+    $('qtyRow').classList.toggle('hidden', !!batch);
+    $('stayNote').classList.toggle('hidden', !!batch);
+    $('batchNote').classList.toggle('hidden', !batch);
+    $('shareBtn').textContent = batch && batch.length > 1 ? 'Save / share this label image' : 'Save / share label image';
   }
   showItem();
 
@@ -196,6 +275,72 @@
     return s;
   }
 
+  // Code 128 set B: text -> module widths, bar first. Same encoder as the spine roller's
+  // src/code128.js, which is checked there against python-barcode.
+  const C128 = ('212222 222122 222221 121223 121322 131222 122213 122312 132212 221213 221312 231212 112232 122132 122231 113222 ' +
+    '123122 123221 223211 221132 221231 213212 223112 312131 311222 321122 321221 312212 322112 322211 212123 212321 232121 ' +
+    '111323 131123 131321 112313 132113 132311 211313 231113 231311 112133 112331 132131 113123 113321 133121 313121 211331 ' +
+    '231131 213113 213311 213131 311123 311321 331121 312113 312311 332111 314111 221411 431111 111224 111422 121124 121421 ' +
+    '141122 141221 112214 112412 122114 122411 142112 142211 241211 221114 413111 241112 134111 111242 121142 121241 114212 ' +
+    '124112 124211 411212 421112 421211 212141 214121 412121 111143 111341 131141 114113 114311 411113 411311 113141 114131 ' +
+    '311141 411131 211412 211214 211232 2331112').split(' ');
+  function code128(text) {
+    const vals = [104];
+    for (const ch of text) vals.push(ch.charCodeAt(0) - 32);
+    let sum = vals[0];
+    for (let i = 1; i < vals.length; i++) sum += vals[i] * i;
+    vals.push(sum % 103, 106);
+    const widths = [];
+    for (const v of vals) for (const d of C128[v]) widths.push(+d);
+    return widths;
+  }
+
+  // Title large at top left, lines beside it, barcode across the bottom. On a tube the
+  // label's long side runs along the tube, so the bars wrap round it and the code reads
+  // along the straight length.
+  function drawBarcodeLabel(ctx, W, H, lab) {
+    const m = Math.round(H * 0.06);
+    // Whole dots per module, as for the QR: fractional bars print unevenly on a 1-bit head.
+    // The quiet zone (10 modules each side) has to be inside the label — past its edge is
+    // whatever it's stuck to.
+    const widths = code128(lab.code);
+    const modules = widths.reduce((a, b) => a + b, 0);
+    const dpm = Math.floor(W / (modules + 20));
+    const bh = Math.round(H * 0.42), by = H - m - bh;
+    if (dpm >= 1) {
+      let x = Math.round((W - modules * dpm) / 2);
+      widths.forEach((w, i) => { if (i % 2 === 0) ctx.fillRect(x, by, w * dpm, bh); x += w * dpm; });
+    } else {
+      ctx.font = `500 ${Math.round(H * 0.08)}px 'DM Sans', sans-serif`;
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Barcode too long for this label', m, by + bh / 2, W - 2 * m);
+    }
+
+    // Text block above the barcode. Sizes come from glyph metrics so the title's digits,
+    // not its em box, fill the block height.
+    const top = m, bottom = by - Math.round(H * 0.07), blockH = bottom - top;
+    ctx.textBaseline = 'alphabetic';
+    let tw = 0;
+    if (lab.title) {
+      ctx.font = `700 100px 'DM Sans', sans-serif`;
+      const t = ctx.measureText(lab.title);
+      const s = Math.floor(100 * Math.min(blockH / (t.actualBoundingBoxAscent || 72), W * 0.42 / t.width));
+      ctx.font = `700 ${s}px 'DM Sans', sans-serif`;
+      ctx.fillText(lab.title, m, bottom);
+      tw = ctx.measureText(lab.title).width + Math.round(H * 0.08);
+    }
+    const lines = lab.lines.filter(Boolean);
+    if (!lines.length) return;
+    const x = m + tw, colW = W - x - m, lh = blockH / lines.length;
+    // One size for every line: the largest at which they all fit the column.
+    let s = Math.round(lh * 0.82);
+    for (const l of lines) s = Math.min(s, fitFontSize(ctx, l, colW, s, '700', "'DM Sans', sans-serif"));
+    lines.forEach((l, i) => {
+      ctx.font = `${i === 0 ? 700 : 500} ${s}px 'DM Sans', sans-serif`;
+      ctx.fillText(l, x, top + lh * (i + 1) - lh * 0.18, colW);
+    });
+  }
+
   function renderLabel() {
     const wmm = +$('wmm').value || 50, hmm = +$('hmm').value || 30;
     const canvas = $('label');
@@ -209,6 +354,7 @@
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#000';
+    if (batch) { drawBarcodeLabel(ctx, canvas.width, canvas.height, batch[batchIdx]); return; }
 
     // Tight margins so the QR grows to nearly the full label height.
     const m   = Math.round(canvas.height * 0.05);
@@ -303,13 +449,22 @@
   function showUnsupported(reason) {
     unsupported = true;
     $('ios-warning').classList.remove('hidden');
-    $('printBtn').disabled = true;
+    $('printBtn').disabled = $('printOneBtn').disabled = true;
     $('printBtn').textContent = 'Bluetooth unavailable in this browser';
     if (reason) log('unsupported: ' + reason);
     $('ios-warning').scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
-  if (!navigator.bluetooth) {
+  // A tab opened from a sandboxed frame without permission to escape inherits the sandbox:
+  // an opaque origin, and no Bluetooth however the browser is set up. Say that rather than
+  // giving browser advice that wouldn't help.
+  if (self.origin === 'null') {
+    unsupported = true;
+    $('sandbox-warning').classList.remove('hidden');
+    $('printBtn').disabled = $('printOneBtn').disabled = true;
+    $('printBtn').textContent = 'Bluetooth blocked in this tab';
+    log('unsupported: opaque origin (sandboxed)');
+  } else if (!navigator.bluetooth) {
     showUnsupported('navigator.bluetooth is undefined');
   } else if (navigator.bluetooth.getAvailability) {
     navigator.bluetooth.getAvailability()
@@ -322,10 +477,24 @@
 
   // The label reads differently once the printer is attached: the next one is one tap,
   // with no chooser, for as long as this tab stays open.
+  // In a batch it says what will go: all of it, or from the label on screen to the end.
   function setPrintBtn() {
     if (unsupported) return;
-    $('printBtn').textContent = connected ? 'Print' : 'Connect printer & print';
+    let what = '';
+    if (batch) {
+      const n = batch.length;
+      what = n === 1 ? ' 1 label' : batchIdx === 0 ? ` all ${n} labels` : ` labels ${batchIdx + 1}–${n}`;
+    }
+    $('printBtn').textContent = connected ? 'Print' + what : 'Connect printer & print' + what;
   }
+  setPrintBtn();
+
+  function showLabel(i) {
+    batchIdx = Math.max(0, Math.min(batch.length - 1, i));
+    showItem(); setPrintBtn(); renderLabel();
+  }
+  $('prevBtn').onclick = () => showLabel(batchIdx - 1);
+  $('nextBtn').onclick = () => showLabel(batchIdx + 1);
 
   // NIIMBOT primary GATT service (from niimbluelib).
   const NIIMBOT_SERVICE = 'e7810a71-73ae-499d-8c15-faa9aef0c3f2';
@@ -374,10 +543,11 @@
     finally { navigator.bluetooth.requestDevice = orig; }
   }
 
-  $('printBtn').onclick = async () => {
+  // `pages` is a list of indexes into the batch, or null for the single label on screen.
+  async function print(pages) {
     if (unsupported) return;
-    const btn = $('printBtn');
-    btn.disabled = true;
+    const btns = [$('printBtn'), $('printOneBtn')];
+    btns.forEach(b => { b.disabled = true; });
     try {
       renderLabel();
 
@@ -387,7 +557,7 @@
         client.on('connect', () => { connected = true; log('connected'); setPrintBtn(); });
         client.on('disconnect', () => { connected = false; log('disconnected'); setPrintBtn(); });
         client.on('printprogress', e =>
-          status(`Printing page ${e.page}/${e.pagesTotal} — ${e.pagePrintProgress}%`));
+          status(`Printing label ${e.page}/${e.pagesTotal} — ${e.pagePrintProgress}%`));
         await connectClient(client);
 
         // Match the canvas to THIS printer's real resolution so the label prints
@@ -404,12 +574,9 @@
         } catch (e) { log('metadata read failed: ' + (e.message || e)); }
       }
 
-      // Re-render at the (now known) device resolution before encoding.
-      renderLabel();
-
       const dir = $('dir').value;             // 'left' or 'top' — feed orientation
-      const qty = Math.max(1, +$('qty').value || 1);
-      const encoded = ImageEncoder.encodeCanvas($('label'), dir);
+      const qty = batch ? 1 : Math.max(1, +$('qty').value || 1);
+      const list = pages || [null];
 
       // Auto-detect the print task; fall back to B1. An explicit name in the field wins,
       // so the printer variant can be tuned during device testing without a code change.
@@ -418,18 +585,26 @@
       log('print task: ' + taskName);
 
       status('Printing…');
+      // One task for the whole batch, one page per label: the connection is set up once and
+      // the printer feeds straight from one label to the next.
       const task = client.abstraction.newPrintTask(taskName, {
-        totalPages: qty, statusPollIntervalMs: 100, statusTimeoutMs: 8000,
+        totalPages: list.length * qty, statusPollIntervalMs: 100, statusTimeoutMs: 8000,
       });
       try {
         await task.printInit();
-        await task.printPage(encoded, qty);
-        await task.waitForPageFinished();
+        for (const i of list) {
+          // Each label goes on screen as it is sent, so if one fails it is the one showing.
+          if (i !== null) { batchIdx = i; showItem(); setPrintBtn(); }
+          renderLabel();                      // at the (now known) device resolution
+          await task.printPage(ImageEncoder.encodeCanvas($('label'), dir), qty);
+          await task.waitForPageFinished();
+        }
         await task.waitForFinished();
       } finally {
         await task.printEnd();
       }
-      status('Printed ✓', 'ok');
+      if (list.length > 1) showLabel(0);
+      status(list.length > 1 ? `Printed ${list.length} labels ✓` : 'Printed ✓', 'ok');
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
       log('ERROR: ' + msg);
@@ -438,13 +613,18 @@
         showUnsupported(msg);
       } else if (/cancel|no devices/i.test(msg)) {
         status('Cancelled — no printer selected.');
+      } else if (pages && pages.length > 1) {
+        status(`Stopped at label ${batchIdx + 1} of ${batch.length}: ${msg}. Check what came out, ` +
+          'step back to the first label that didn’t, and print from there.', 'err');
       } else {
         status('Error: ' + msg, 'err');
       }
     } finally {
-      if (!unsupported) $('printBtn').disabled = false;
+      if (!unsupported) btns.forEach(b => { b.disabled = false; });
     }
-  };
+  }
+  $('printBtn').onclick = () => print(batch ? batch.map((_, i) => i).slice(batchIdx) : null);
+  $('printOneBtn').onclick = () => print([batchIdx]);
 
   // ── Save / share label image (no Bluetooth) ──────────────────────
   // Exports the composed label as a PNG and hands it to the OS share sheet. On iOS this is
@@ -464,13 +644,14 @@
       const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
       if (!blob) { status('Could not render the label image.', 'err'); return; }
 
-      const fname = (wid ? wid.replace(/[^\w-]+/g, '') : 'weasly-label') + '.png';
+      const id = batch ? batch[batchIdx].code : wid;
+      const fname = (id ? id.replace(/[^\w-]+/g, '') : 'weasly-label') + '.png';
       const file = new File([blob], fname, { type: 'image/png' });
 
       // Preferred: native share sheet with the image file (iOS Safari 15+, Android Chrome).
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         try {
-          await navigator.share({ files: [file], title: wid || 'Weasly label' });
+          await navigator.share({ files: [file], title: id || 'Weasly label' });
           status('Shared ✓ — open the NIIMBOT app to print (or check Photos).', 'ok');
           return;
         } catch (e) {
@@ -518,7 +699,9 @@
     wid      = d.wid;
     name     = typeof d.name === 'string' ? d.name : '';
     qrTarget = typeof d.url === 'string' && d.url ? d.url : wid;
+    batch = null;
     showItem();
+    setPrintBtn();
     renderLabel();
     status(connected ? 'Ready — printer still connected. Tap print.' : 'Ready.', connected ? 'ok' : '');
     log('label pushed: ' + wid);
@@ -540,7 +723,7 @@
   // The explicit way out, for when printing is finished.
   $('closeBtn').onclick = () => {
     window.close();
-    setTimeout(() => status('Close this tab to return to Weasly.'), 200);
+    setTimeout(() => status('Close this tab to return to ' + (from || 'Weasly') + '.'), 200);
   };
 </script>
 </body>
