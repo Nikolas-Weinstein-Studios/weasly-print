@@ -95,7 +95,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 13</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 14</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="batch-error" class="warn hidden"></div>
@@ -215,8 +215,8 @@
   // Other tools hand over a whole batch in the URL fragment, which never reaches a server:
   //   print.html#from=<tool name>&labels=<JSON [{code, title, lines}]>
   // Each label is a Code 128 barcode of `code` across the bottom, `title` large at top left
-  // and up to four short `lines` beside it. The NYU spine roller sends one per spine:
-  //   {code:'S047', title:'47', lines:['Center  L-3', 'R 2905   cut 1543', 'Stock 5, cut 2 of 7']}
+  // and up to four short `lines` beside it, the first one larger. The NYU spine roller sends one
+  // per spine: {code:'S047', title:'47', lines:['Cut 1019', 'Emerald  A-12    R 2584', 'Stock 5, cut 2 of 7']}
   // It runs as a Claude artifact — a sandboxed iframe, Weasly's problem again — and opens
   // this page with a plain link, so there is no opener to post to: the fragment carries
   // everything, and the whole batch goes out over one connection.
@@ -378,13 +378,21 @@
     }
     const lines = lab.lines.filter(Boolean);
     if (!lines.length) return;
-    const x = m + tw, colW = W - x - m, lh = blockH / lines.length;
-    // One size for every line: the largest at which they all fit the column.
-    let s = Math.round(lh * 0.82);
-    for (const l of lines) s = Math.min(s, fitFontSize(ctx, l, colW, s, '700', "'DM Sans', sans-serif"));
+    const F = "'DM Sans', sans-serif", x = m + tw, colW = W - x - m;
+    // The first line is the headline (the spine roller's cut length): it gets a band 1.6 times
+    // as tall as each other line and is as large as fits. The rest share one size, the largest
+    // at which they all fit the column.
+    const wt = lines.map((_, i) => (i === 0 && lines.length > 1 ? 1.6 : 1));
+    const unit = blockH / wt.reduce((a, b) => a + b, 0);
+    const s0 = fitFontSize(ctx, lines[0], colW, Math.round(unit * wt[0] * 0.82), '700', F);
+    let s = Math.round(unit * 0.82);
+    for (const l of lines.slice(1)) s = Math.min(s, fitFontSize(ctx, l, colW, s, '700', F));
+    let y = top;
     lines.forEach((l, i) => {
-      ctx.font = `${i === 0 ? 700 : 500} ${s}px 'DM Sans', sans-serif`;
-      ctx.fillText(l, x, top + lh * (i + 1) - lh * 0.18, colW);
+      const lh = unit * wt[i];
+      y += lh;
+      ctx.font = `${i === 0 ? 700 : 500} ${i === 0 ? s0 : s}px ${F}`;
+      ctx.fillText(l, x, y - lh * 0.18, colW);
     });
   }
 
