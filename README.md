@@ -52,14 +52,15 @@ made it, so a reload means another trip through the device chooser for every sin
 A tool that can't reach Bluetooth itself links here with the labels in the URL fragment:
 
 ```
-print.html#from=Spine+roller&labels=[{"code":"S047","title":"47","lines":["Cut 1019","Emerald  A-12    R 2584"]}, …]
+print.html#from=Spine+roller&labels=[{"code":"S047","title":"47","lines":["Cut 1019","V3 Emerald  B-12","R 2584"]}, …]
 ```
 
 (URL-encoded, as `URLSearchParams` writes it.) Each label is a Code 128 barcode of `code`
 across the bottom, `title` large at top left, and up to four `lines` beside it, drawn at
-whatever label size is set on the page. The first line is the headline: it gets a band 1.6
-times the height of each other line and is drawn as large as fits (the spine roller puts the
-cut length there). At most 500 labels; anything else in a bad shape is
+whatever label size is set on the page. Lines get smaller down the label: the first gets a
+band 1.6 times the height of a plain line and the second 1.3 times, both bold and as large as
+fits; the rest share one size (the spine roller sends cut length, then section, then stock
+position and radius). At most 500 labels; anything else in a bad shape is
 refused with a message rather than printed.
 
 - **One at a time** (the default) prints the label on screen and brings up the next one not
