@@ -95,7 +95,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 15</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 16</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="batch-error" class="warn hidden"></div>
@@ -147,7 +147,14 @@
     </div>
     <div class="row">
       <label>Printer / task</label>
-      <input id="task" value="auto" title="'auto' detects the printer, falling back to B1. During device testing you can type an explicit niimbluelib task name here (e.g. B1, D11, V3, V4, V5) without editing code.">
+      <select id="task" title="How the page talks to the printer. 'auto' uses niimbluelib's choice for the connected model (B1 for the M2-H). Pick another only to test.">
+        <option value="auto" selected>auto</option>
+        <option value="B1">B1 (M2-H, B1, D110-M)</option>
+        <option value="D110M_V4">D110M_V4 (B1 Pro, B21 Pro)</option>
+        <option value="D110">D110 (D110, B21S)</option>
+        <option value="B21_V1">B21_V1 (B21)</option>
+        <option value="D11_V1">D11_V1 (D11, D11S)</option>
+      </select>
     </div>
     <div class="row hidden" id="modeRow">
       <label>Print</label>
@@ -580,6 +587,45 @@
     showLabel(0);
   };
 
+  // Print task: the list is niimbluelib alpha.39's `printTaskNames`, each with models the library
+  // assigns it. Any other name throws inside the library, so this is a list rather than a text
+  // field. A hand-picked task is remembered in this browser; 'auto' is the default.
+  const TASK_KEY = 'weasly-print-task';
+  try {
+    const t = localStorage.getItem(TASK_KEY);
+    if (t && [...$('task').options].some(o => o.value === t)) $('task').value = t;
+  } catch (e) {}
+  $('task').onchange = () => { try { localStorage.setItem(TASK_KEY, $('task').value); } catch (e) {} };
+
+  // 'auto' is the library's own choice for the connected model. It assigns the M2_H to B1, in
+  // alpha.39 and still in 0.47.1. A model it doesn't list gets D110M_V4 if it reports protocol 4
+  // or later (0.47.1's rule, ported here), otherwise B1.
+  function autoTask() {
+    const t = client.getPrintTaskType && client.getPrintTaskType();
+    if (t) return t;
+    const v = client.getPrinterInfo && client.getPrinterInfo().protocolVersion;
+    return v >= 4 ? 'D110M_V4' : 'B1';
+  }
+
+  // Ends the job with PrintEnd, whose reply is 'f4'. The library waits 1 s for it, but its status
+  // poll calls the job finished as soon as the printer's page count reaches the last page, while
+  // that label can still be printing and feeding, so the M2_H can answer late. Wait longer, and
+  // ask again if the printer says it isn't ready to end (printEnd() returns false).
+  async function endPrint(task) {
+    const a = client.abstraction;
+    a.setPacketTimeout && a.setPacketTimeout(5000);
+    try {
+      for (let i = 0; i < 3; i++) {
+        if (await task.printEnd() !== false) return;
+        log('print end: printer not ready, asking again');
+        await new Promise(r => setTimeout(r, 700));
+      }
+      throw new Error('the printer would not end the job');
+    } finally {
+      a.setDefaultPacketTimeout && a.setDefaultPacketTimeout();
+    }
+  }
+
   // NIIMBOT primary GATT service (from niimbluelib).
   const NIIMBOT_SERVICE = 'e7810a71-73ae-499d-8c15-faa9aef0c3f2';
 
@@ -653,27 +699,32 @@
           if (meta) {
             if (meta.dpi)            DPMM    = meta.dpi / 25.4;
             if (meta.printheadPixels) HEAD_PX = meta.printheadPixels;
-            log(`printer: ${meta.model ?? '?'} — ${meta.dpi}dpi, head ${meta.printheadPixels}px, dir ${meta.printDirection}`);
+            const pv = client.getPrinterInfo && client.getPrinterInfo().protocolVersion;
+            log(`printer: ${meta.model ?? '?'} — ${meta.dpi}dpi, head ${meta.printheadPixels}px, dir ${meta.printDirection}` +
+              (pv !== undefined ? `, protocol ${pv}` : ''));
           } else {
             log('no model metadata — using defaults (300dpi / M2_H)');
           }
         } catch (e) { log('metadata read failed: ' + (e.message || e)); }
+        $('task').options[0].textContent = 'auto (' + autoTask() + ')';
       }
 
       const dir = $('dir').value;             // 'left' or 'top' — feed orientation
-
-      // Auto-detect the print task; fall back to B1. An explicit name in the field wins,
-      // so the printer variant can be tuned during device testing without a code change.
-      let taskName = $('task').value.trim();
-      if (!taskName || taskName.toLowerCase() === 'auto') taskName = client.getPrintTaskType() ?? 'B1';
-      log('print task: ' + taskName);
+      const taskName = $('task').value === 'auto' ? autoTask() : $('task').value;
+      log('print task: ' + taskName + ($('task').value === 'auto' ? ' (auto)' : ' (chosen by hand)'));
 
       status('Printing…');
+      // No heartbeat packets in the middle of a job: NiimBlue, the library's own app, stops the
+      // heartbeat before printing and starts it again after. The library starts it on connect.
+      client.stopHeartbeat && client.stopHeartbeat();
       // One task for the whole batch, one page per label: the connection is set up once and
       // the printer feeds straight from one label to the next.
       const task = client.abstraction.newPrintTask(taskName, {
         totalPages: jobs.reduce((n, j) => n + (j.qty || 1), 0), statusPollIntervalMs: 100, statusTimeoutMs: 8000,
       });
+      // The job always gets ended, but a missing reply to that is not allowed to hide an earlier
+      // error, nor to fail a job the printer has already reported finished.
+      let failure = null, noEndReply = false;
       try {
         await task.printInit();
         for (const j of jobs) {
@@ -685,23 +736,31 @@
           if (j.idx !== undefined) setPrinted([batch[j.idx].code], true);
         }
         await task.waitForFinished();
-      } finally {
-        await task.printEnd();
+      } catch (e) { failure = e; }
+      try {
+        await endPrint(task);
+      } catch (e) {
+        log('print end: ' + ((e && e.message) || e));
+        if (!failure) noEndReply = true;
       }
+      if (failure) throw failure;
+      if (noEndReply) log('printer reported every label printed; no reply to print end — treated as printed');
+      const note = noEndReply ? ' The printer reported it printed but didn’t send its final “done” reply. ' +
+        'Nothing to do unless the label is missing.' : '';
       if (isTest) {
         renderLabel();
-        status('Test label printed ✓ — check the corner marks, then scan it: it should read TEST.', 'ok');
+        status('Test label printed ✓ — check the corner marks, then scan it: it should read TEST.' + note, 'ok');
       } else if (!batch) {
-        status('Printed ✓', 'ok');
+        status('Printed ✓' + note, 'ok');
       } else if (jobs.length === 1 && mode === 'step' && batch.length > 1) {
         // as you go: bring up the next label still to print
         const done = batch[jobs[0].idx], nxt = nextUnprinted(jobs[0].idx);
         showLabel(nxt);
-        status(isPrinted(nxt) ? `Printed ${done.title || done.code} ✓ — that’s the whole batch.`
-          : `Printed ${done.title || done.code} ✓ — next up: ${batch[nxt].title || batch[nxt].code}.`, 'ok');
+        status((isPrinted(nxt) ? `Printed ${done.title || done.code} ✓ — that’s the whole batch.`
+          : `Printed ${done.title || done.code} ✓ — next up: ${batch[nxt].title || batch[nxt].code}.`) + note, 'ok');
       } else {
         showLabel(jobs.length > 1 ? nextUnprinted(batchIdx) : batchIdx);
-        status(jobs.length > 1 ? `Printed ${jobs.length} labels ✓` : 'Printed ✓', 'ok');
+        status((jobs.length > 1 ? `Printed ${jobs.length} labels ✓` : 'Printed ✓') + note, 'ok');
       }
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
@@ -718,6 +777,7 @@
         status('Error: ' + msg, 'err');
       }
     } finally {
+      if (connected && client.startHeartbeat) client.startHeartbeat();
       if (isTest) renderLabel();
       if (!unsupported) btns.forEach(b => { b.disabled = false; });
     }

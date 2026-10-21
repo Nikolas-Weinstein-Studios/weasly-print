@@ -86,8 +86,32 @@ drives the test print, one at a time, resume and all at once against a stand-in 
 (its `test/fake-printer.js` answers the niimbluelib import), and scans every label sent. Run
 it after changing anything here.
 
+## Printer / task
+
+How the page talks to the printer is niimbluelib's "print task". **Printer / task** is a list of
+the tasks niimbluelib alpha.39 has (`B1`, `D110M_V4`, `D110`, `B21_V1`, `D11_V1`); anything
+else throws inside the library. **auto** (the default) uses the library's choice for the
+connected model, which for the **M2-H is `B1`**, in alpha.39 and still in 0.47.1. A model the
+library doesn't list gets `D110M_V4` if it reports protocol 4 or later, otherwise `B1`. A task
+picked by hand is remembered in that browser; the connection log says which task each print
+used and whether it was auto or chosen.
+
+Two things about ending a job (build 16, after the M2-H failed with "Timeout waiting response
+(waited for f4)", `f4` being the reply to PrintEnd):
+
+- The status poll calls a job finished as soon as the printer's page count reaches the last
+  page, while that label can still be printing and feeding, and the library then gives the
+  PrintEnd reply 1 s. The page now gives it 5 s and asks up to three times.
+- If the printer has reported every label printed but still never answers PrintEnd, that is
+  shown as printed with a note, not as an error. An error earlier in the job is reported as
+  itself rather than as the PrintEnd timeout that follows it.
+
+The heartbeat the library starts on connect is paused for the length of each job, as NiimBlue
+(the library author's app) does.
+
 ## Editing / testing
 
 This is the canonical copy of `print.html` — edit it here, not in the Weasly repo.
 See **LABEL-PRINTING.md** in the Weasly repo for device-test notes (M2 vs M2-H protocol,
-print-task name, orientation).
+orientation). Its list of task names (`D11`, `V3`, `V4`, `V5`) is out of date; the valid
+ones are above.
