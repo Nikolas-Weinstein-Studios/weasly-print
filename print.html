@@ -95,7 +95,7 @@
 </head>
 <body>
 <main>
-  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 16</span></h1>
+  <h1>Print Label <span style="font:400 12px 'DM Mono',monospace;color:var(--muted)">build 17</span></h1>
   <div class="meta" id="meta"></div>
 
   <div id="batch-error" class="warn hidden"></div>
@@ -154,6 +154,15 @@
         <option value="D110">D110 (D110, B21S)</option>
         <option value="B21_V1">B21_V1 (B21)</option>
         <option value="D11_V1">D11_V1 (D11, D11S)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Bluetooth speed</label>
+      <select id="pace" title="Pause between the Bluetooth packets that carry the label image. Some Bluetooth hardware drops packets sent too fast, and the printer then never finishes the label. Slower takes a few seconds longer per label.">
+        <option value="10">Fast (10 ms)</option>
+        <option value="30" selected>Normal (30 ms)</option>
+        <option value="60">Slow (60 ms)</option>
+        <option value="100">Slowest (100 ms)</option>
       </select>
     </div>
     <div class="row hidden" id="modeRow">
@@ -597,6 +606,19 @@
   } catch (e) {}
   $('task').onchange = () => { try { localStorage.setItem(TASK_KEY, $('task').value); } catch (e) {} };
 
+  // Pause between Bluetooth packets. The label image goes out as a few hundred packets that the
+  // printer doesn't acknowledge, 10 ms apart by default in niimbluelib. Some Bluetooth hardware
+  // drops packets at that rate (niimblue issue #5, a B1 failing on labels with a lot of black);
+  // the printer then never gets the whole page and doesn't answer PageEnd ('e4'). The M2-H did
+  // exactly that on 2026-10-21. NiimBlue has the same setting in its debug panel. Remembered too.
+  const PACE_KEY = 'weasly-print-pace';
+  try {
+    const v = localStorage.getItem(PACE_KEY);
+    if (v && [...$('pace').options].some(o => o.value === v)) $('pace').value = v;
+  } catch (e) {}
+  $('pace').onchange = () => { try { localStorage.setItem(PACE_KEY, $('pace').value); } catch (e) {} };
+  let packetsSent = 0;
+
   // 'auto' is the library's own choice for the connected model. It assigns the M2_H to B1, in
   // alpha.39 and still in 0.47.1. A model it doesn't list gets D110M_V4 if it reports protocol 4
   // or later (0.47.1's rule, ported here), otherwise B1.
@@ -690,6 +712,7 @@
         client.on('disconnect', () => { connected = false; log('disconnected'); setPrintBtn(); });
         client.on('printprogress', e =>
           status(`Printing label ${e.page}/${e.pagesTotal} — ${e.pagePrintProgress}%`));
+        client.on('rawpacketsent', () => { packetsSent++; });
         await connectClient(client);
 
         // Match the canvas to THIS printer's real resolution so the label prints
@@ -712,8 +735,10 @@
       const dir = $('dir').value;             // 'left' or 'top' — feed orientation
       const taskName = $('task').value === 'auto' ? autoTask() : $('task').value;
       log('print task: ' + taskName + ($('task').value === 'auto' ? ' (auto)' : ' (chosen by hand)'));
+      const pace = +$('pace').value;
+      client.setPacketInterval && client.setPacketInterval(pace);
 
-      status('Printing…');
+      status('Sending the label to the printer…');
       // No heartbeat packets in the middle of a job: NiimBlue, the library's own app, stops the
       // heartbeat before printing and starts it again after. The library starts it on connect.
       client.stopHeartbeat && client.stopHeartbeat();
@@ -731,7 +756,12 @@
           // Each label goes on screen as it is sent, so if one fails it is the one showing.
           if (j.idx !== undefined) { batchIdx = j.idx; showItem(); setPrintBtn(); }
           renderLabel(j.label);               // at the (now known) device resolution
-          await task.printPage(ImageEncoder.encodeCanvas($('label'), dir), j.qty || 1);
+          const n0 = packetsSent, t0 = Date.now();
+          try {
+            await task.printPage(ImageEncoder.encodeCanvas($('label'), dir), j.qty || 1);
+          } finally {
+            log(`label sent: ${packetsSent - n0} packets in ${((Date.now() - t0) / 1000).toFixed(1)} s, ${pace} ms apart`);
+          }
           await task.waitForPageFinished();
           if (j.idx !== undefined) setPrinted([batch[j.idx].code], true);
         }
@@ -770,11 +800,17 @@
         showUnsupported(msg);
       } else if (/cancel|no devices/i.test(msg)) {
         status('Cancelled — no printer selected.');
-      } else if (jobs.length > 1) {
-        status(`Stopped at label ${batchIdx + 1} of ${batch.length}: ${msg}. Check what came out, ` +
-          'step back to the first label that didn’t, and print from there.', 'err');
       } else {
-        status('Error: ' + msg, 'err');
+        // 'e4' is the reply to PageEnd: the printer didn't get the whole label image.
+        const slower = $('pace').selectedIndex < $('pace').options.length - 1;
+        const why = /waited for e4/.test(msg)
+          ? 'The printer didn’t receive the whole label over Bluetooth' +
+            (slower ? ' — set Bluetooth speed one step slower and print again.' : '.')
+          : msg;
+        if (jobs.length > 1)
+          status(`Stopped at label ${batchIdx + 1} of ${batch.length}: ${why} Check what came out, ` +
+            'step back to the first label that didn’t, and print from there.', 'err');
+        else status(/waited for e4/.test(msg) ? why : 'Error: ' + msg, 'err');
       }
     } finally {
       if (connected && client.startHeartbeat) client.startHeartbeat();
