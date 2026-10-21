@@ -109,6 +109,21 @@ Two things about ending a job (build 16, after the M2-H failed with "Timeout wai
 The heartbeat the library starts on connect is paused for the length of each job, as NiimBlue
 (the library author's app) does.
 
+## Bluetooth speed
+
+Build 16 showed the real M2-H failure, which the PrintEnd timeout had been hiding: "Timeout
+waiting response (waited for e4)", `e4` being the reply to **PageEnd**. The label image goes out
+as a few hundred Bluetooth packets that the printer doesn't acknowledge, 10 ms apart by default
+in niimbluelib. Some Bluetooth hardware drops packets at that rate
+([niimblue #5](https://github.com/MultiMote/niimblue/issues/5): a B1 failing on labels with a
+lot of black, which the spine labels are), and the printer then never gets the whole page.
+
+**Bluetooth speed** sets the pause: Fast 10 ms (the library default), **Normal 30 ms** (the
+page's default since build 17), Slow 60 ms, Slowest 100 ms. NiimBlue has the same setting in
+its debug panel. The choice is remembered in that browser. An `e4` timeout is reported as
+"the printer didn't receive the whole label" with a prompt to go one step slower, and the log
+records how many packets each label took and how long.
+
 ## Editing / testing
 
 This is the canonical copy of `print.html` — edit it here, not in the Weasly repo.
